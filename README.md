@@ -51,14 +51,14 @@ sudo pacman -S alsa-lib sox flac wavpack mac lame ffmpeg
 
 ## Installation
 
-1. **Clone and build:**
+**Clone and build:**
    ```bash
    git clone <repository-url>
    cd qua_play
    make
    ```
 
-2. **Install:**
+**Install:**
    ```bash
    make install
    ```

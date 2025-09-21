@@ -67,8 +67,8 @@ sudo pacman -S alsa-lib sox flac wavpack mac lame ffmpeg
 
 ### Basic Playback
 ```bash
-qua_setup audio_file.flac
-qua_setup audio_file.wav hw:1,0  # Specify audio device
+qua_handler audio_file.flac
+qua_handler audio_file.wav hw:1,0  # Specify audio device
 ```
 
 ### Configuration

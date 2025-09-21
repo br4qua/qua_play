@@ -1,0 +1,58 @@
+# Compiler and flags
+CC = gcc
+CFLAGS = -D_POSIX_C_SOURCE=200809L -Wall -Wextra -march=native -mtune=native \
+         -flto -O3 -funroll-loops -fomit-frame-pointer \
+         -finline-limit=1000 -fno-stack-protector
+LDFLAGS = -lasound 
+
+# Target and source
+TARGET = bin/qua_player_32_gcc
+SOURCE = src/qua_player_32.c
+
+# Installation directories
+PREFIX ?= /usr/local
+BINDIR = $(PREFIX)/bin
+SCRIPTS = qua_handler qua_setup
+
+# Default target
+all: $(TARGET)
+
+# Debug flags
+DEBUG_CFLAGS = -DDEBUG -g -O0
+
+# Debug build
+debug: CFLAGS = $(DEBUG_CFLAGS)
+debug: TARGET = bin/qua_player_32_debug
+debug: $(TARGET)
+
+# Build rule
+$(TARGET): $(SOURCE) | bin
+	$(CC) $(CFLAGS) -o $(TARGET) $(SOURCE) $(LDFLAGS)
+
+# Create bin directory
+bin:
+	mkdir -p bin
+
+# Install target
+install: $(TARGET)
+	@echo "Installing Qua Audio Player..."
+	install -d $(BINDIR)
+	install -m 755 $(TARGET) $(BINDIR)/
+	install -m 755 $(SCRIPTS) $(BINDIR)/
+	@echo "Installation complete."
+
+# Uninstall target
+uninstall:
+	@echo "Uninstalling Qua Audio Player..."
+	rm -f $(addprefix $(BINDIR)/, $(SCRIPTS))
+	@echo "Uninstallation complete"
+
+# Clean target
+clean:
+	rm -f $(TARGET) bin/qua_player_32_debug
+
+# Rebuild target
+rebuild: clean all
+
+# Mark targets as phony
+.PHONY: all debug clean rebuild install uninstall

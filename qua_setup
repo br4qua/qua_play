@@ -13,7 +13,7 @@ FORCE_SAMPLE_RATE=false # Force playback at a specific sample rate. Options: fal
 FALLBACK_SAMPLE_RATE=96000 # Fallback bit-depth, used when detected bit-depth is not within VALID_BIT_DEPTH
 
 FILE="$1"
-DEVICE="$2"
+DEVICE="hw:0,0"
 
 main() {
     setup_format

@@ -13,6 +13,4 @@ while [ $count -lt 10 ]; do
     count=$((count + 1))
 done
 
-qua_setup "$1" hw:0,0
-
-
+qua_setup "$1"

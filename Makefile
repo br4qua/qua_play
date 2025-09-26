@@ -13,7 +13,8 @@ SOURCE = src/qua_player_32.c
 PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 SCRIPTS = qua_handler qua_setup
-
+APPLICATIONSDIR = /usr/share/applications
+DESKTOP_FILE = qua-audio-player.desktop
 # Default target
 all: $(TARGET)
 
@@ -37,14 +38,22 @@ bin:
 install: $(TARGET)
 	@echo "Installing Qua Audio Player..."
 	install -d $(BINDIR)
+	install -d $(APPLICATIONSDIR)
 	install -m 755 $(TARGET) $(BINDIR)/
 	install -m 755 $(SCRIPTS) $(BINDIR)/
+	install -m 644 $(DESKTOP_FILE) $(APPLICATIONSDIR)/
+	@echo "Updating desktop database..."
+	-update-desktop-database $(APPLICATIONSDIR) 2>/dev/null || true
 	@echo "Installation complete."
 
 # Uninstall target
 uninstall:
 	@echo "Uninstalling Qua Audio Player..."
 	rm -f $(addprefix $(BINDIR)/, $(SCRIPTS))
+	rm -f $(BINDIR)/qua_player_32_gcc
+	rm -f $(APPLICATIONSDIR)/$(DESKTOP_FILE)
+	@echo "Updating desktop database..."
+	-update-desktop-database $(APPLICATIONSDIR) 2>/dev/null || true
 	@echo "Uninstallation complete"
 
 # Clean target

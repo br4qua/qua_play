@@ -1,0 +1,107 @@
+#!/bin/sh
+
+# ALSA Library LTO Build Script
+# This script downloads, patches, and compiles ALSA library with aggressive LTO optimizations
+
+set -e  # Exit on any error
+
+# Source external URLs
+ALSA_URL="https://www.alsa-project.org/files/pub/lib/alsa-lib-1.2.14.tar.bz2"
+
+# Configuration
+ALSA_VERSION="1.2.14"
+WORK_DIR="/tmp"
+BUILD_DIR="${WORK_DIR}/alsa-lib-${ALSA_VERSION}"
+LIB_DIR="$(pwd)/lib"
+
+echo "=== ALSA Library LTO Build Script ==="
+echo "Version: ${ALSA_VERSION}"
+echo "Build directory: ${BUILD_DIR}"
+echo "Output directory: ${LIB_DIR}"
+echo
+
+# Create lib directory
+mkdir -p "$LIB_DIR"
+
+# Step 1: Download and extract ALSA library
+echo "Step 1: Downloading and extracting ALSA library..."
+cd "${WORK_DIR}"
+wget "${ALSA_URL}"
+tar -xjf "alsa-lib-${ALSA_VERSION}.tar.bz2"
+cd "${BUILD_DIR}"
+
+# Step 2: Patch libtool to prevent LTO disabling
+echo "Step 2: Patching libtool to preserve LTO flags..."
+echo "Finding -fno-lto references:"
+grep -n "\-fno-lto" m4/libtool.m4 ltmain.sh || echo "No -fno-lto flags found initially"
+
+# Comment out any lines that add -fno-lto (the key fix!)
+sed -i 's/.*-fno-lto.*/# &/' m4/libtool.m4
+sed -i 's/.*-fno-lto.*/# &/' ltmain.sh
+
+echo "Patched files - -fno-lto lines have been commented out"
+
+# Step 3: Regenerate build system
+echo "Step 3: Regenerating build system with patched libtool..."
+autoreconf -fiv
+
+# Step 4: Clean any previous builds
+echo "Step 4: Cleaning previous builds..."
+make distclean 2>/dev/null || true
+
+# Step 5: Configure with aggressive LTO optimizations
+echo "Step 5: Configuring with aggressive LTO optimizations..."
+./configure --enable-static --disable-shared \
+            --disable-python --without-debug \
+            CC=clang \
+            CFLAGS="-O3 -march=native -mtune=native -flto \
+                    -mllvm -inline-threshold=2000 \
+                    -mllvm -inlinehint-threshold=3000 \
+                    -finline-functions \
+                    -finline-hint-functions \
+                    -funroll-loops \
+                    -fvectorize \
+                    -fslp-vectorize \
+                    -ffast-math \
+                    -fno-math-errno \
+                    -fno-trapping-math \
+                    -freciprocal-math \
+                    -ffp-contract=fast \
+                    -fomit-frame-pointer \
+                    -ffunction-sections \
+                    -fdata-sections \
+                    -fmerge-all-constants" \
+            LDFLAGS="-flto -fuse-ld=lld -Wl,--gc-sections -Wl,--strip-all -Wl,--as-needed -Wl,-O3 -Wl,--build-id=none" \
+            # LDFLAGS="-flto \
+            #          -Wl,--gc-sections \
+            #          -Wl,--strip-all \
+            #          -Wl,--as-needed \
+            #          -Wl,-O3 \
+            #          -Wl,--build-id=none" \
+            AR=llvm-ar \
+            RANLIB=llvm-ranlib
+
+# Step 6: Build the library
+echo "Step 6: Building ALSA library with LTO..."
+make -j$(nproc)
+
+# Step 7: Install the optimized library
+echo "Step 7: Installing LTO-optimized library..."
+cp src/.libs/libasound.a "$LIB_DIR/"
+
+# Step 8: Verify LTO worked
+echo "Step 8: Verifying LTO compilation..."
+echo "Checking if library contains LLVM bitcode:"
+if ar p "$LIB_DIR/libasound.a" conf.o | file - | grep -q "LLVM"; then
+    echo "✓ SUCCESS: Library contains LLVM bitcode - LTO compilation worked!"
+else
+    echo "⚠ WARNING: Library may not contain LLVM bitcode - LTO may not have worked"
+fi
+
+echo
+echo "=== Build Complete ==="
+echo "LTO-optimized ALSA library installed to: $LIB_DIR/libasound.a"
+echo "Library size: $(ls -lh $LIB_DIR/libasound.a | awk '{print $5}')"
+echo
+echo "To use this library in your projects, link with:"
+echo "  -L$LIB_DIR -lasound"

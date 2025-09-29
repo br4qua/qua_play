@@ -30,9 +30,10 @@
     } while (0)
 #endif
 
-#define RING_BUFFER_SIZE_VAL 65536
-#define PERIOD_SIZE_VAL (4096 * 4)
-#define CHUNK_SIZE_VAL (4096 * 4)
+#define FACTOR 32
+#define RING_BUFFER_SIZE_VAL (65536 / FACTOR)
+#define PERIOD_SIZE_VAL (4096 * 4 / FACTOR) // This turns out to be 512 frames X 8 bytes = 4KB
+#define CHUNK_SIZE_VAL (4096 * 4 / FACTOR)
 
 
 static const snd_pcm_uframes_t RING_BUFFER_SIZE = RING_BUFFER_SIZE_VAL; // 16384*4
@@ -488,6 +489,7 @@ int main(int argc, char *argv[])
     size_t total_size = header.data_bytes + padding_bytes2;
     audio_data = mmap(NULL, total_size, PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+                      
     if (audio_data == MAP_FAILED)
     {
         // Fallback to regular pages
@@ -581,7 +583,7 @@ int main(int argc, char *argv[])
                 setup_precalculated_destinations();
             }
 
-            memcpy(*hot_audio_state.current_dst_ptr++, *hot_audio_state.current_src_ptr++, COPY_SIZE_BYTES);
+            __builtin_memcpy(*hot_audio_state.current_dst_ptr++, *hot_audio_state.current_src_ptr++, COPY_SIZE_BYTES);
 
             snd_pcm_mmap_commit(hot_audio_state.pcm_handle,
                                 hot_audio_state.commit_offset,
@@ -640,7 +642,7 @@ int main(int argc, char *argv[])
                            &hot_audio_state.commit_offset,
                            &hot_audio_state.commit_frames);
 
-        memcpy(*hot_audio_state.current_dst_ptr++,
+        __builtin_memcpy(*hot_audio_state.current_dst_ptr++,
                *hot_audio_state.current_src_ptr++,
                COPY_SIZE_BYTES);
 

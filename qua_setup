@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Player binaries path
-PLAYER_32_BIT=qua_player_32_gcc
+PLAYER_32_BIT=qua_player_32
 
 # Configurations
 CORES="2,3"				# Which core(s) you want the player to play on. Example: "3,4,5" or "2". This is zero indexed.

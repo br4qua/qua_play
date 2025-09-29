@@ -1,18 +1,10 @@
 # Compiler and flags
-CC = clang
+CC = gcc
 CFLAGS = -D_POSIX_C_SOURCE=200809L -Wall -Wextra -march=native -mtune=native \
-         -flto -funroll-loops -fomit-frame-pointer \
+         -flto -O3 -funroll-loops -fomit-frame-pointer \
          -finline-limit=1000 -fno-stack-protector
-LDFLAGS = -L./lib -lasound \
-          -flto -fuse-ld=lld \
-          -Wl,--gc-sections \
-          -Wl,--strip-all \
-          -Wl,-O3 \
-          -Wl,--as-needed \
-          -Wl,--icf=all \
-          -Wl,--hash-style=gnu \
-          -Wl,--build-id=none \
-          -lm
+LDFLAGS = -lasound 
+#LDFLAGS = -L./alsa-static/lib -lasound -flto -fuse-ld=lld -Wl,--gc-sections -Wl,--strip-all -Wl,-O3 -lm
 # Target and source
 TARGET = bin/qua_player_32
 SOURCE = src/qua_player_32.c

@@ -18,8 +18,6 @@ TEMP_DIR="${FILE%/*}"
 dbus-send --session --type=method_call --dest=org.mpris.MediaPlayer2.qua /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player.UpdateMetadata string:"${FILE##*/}" string:"${TEMP_DIR##*/}" &
 }
 
-
-
 # Source Config file
 # CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/qua-player/config"
 # [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
@@ -35,6 +33,11 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -n)
             OFFSET="$2"
+            shift 2
+        ;;
+        -p)
+            # Negate the value for backward movement
+            OFFSET="-$2"
             shift 2
         ;;
         *)

@@ -36,25 +36,17 @@ bool is_audio(const char *name) {
 int filter_fn(const struct dirent *entry) { return is_audio(entry->d_name); }
 
 void update_mpris(const char *filepath) {
-    // char *file_dup = strdup(filepath);
-    // char *base = basename(file_dup);
-    // char *dir_dup = strdup(filepath);
-    // char *folder = basename(dirname(dir_dup));
-    // 
-    // if (vfork() == 0) {
-    //     char dest[] = "org.mpris.MediaPlayer2.qua";
-    //     char path[] = "/org/mpris/MediaPlayer2";
-    //     char method[] = "org.mpris.MediaPlayer2.Player.UpdateMetadata";
-    //     execlp("dbus-send", "dbus-send", "--session", "--type=method_call",
-    //            "--dest=" "org.mpris.MediaPlayer2.qua",
-    //            "/org/mpris/MediaPlayer2",
-    //            "org.mpris.MediaPlayer2.Player.UpdateMetadata",
-    //            base, folder, NULL);
-    //     _exit(1);
-    // }
-    // 
-    // free(file_dup); 
-    // free(dir_dup);
+    char *file_dup = strdup(filepath);
+    char *base = basename(file_dup);
+    char *dir_dup = strdup(filepath);
+    char *folder = basename(dirname(dir_dup));
+    char cmd[PATH_MAX + 512];
+    snprintf(cmd, sizeof(cmd), 
+        "dbus-send --session --type=method_call --dest=org.mpris.MediaPlayer2.qua "
+        "/org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player.UpdateMetadata "
+        "string:\"%s\" string:\"%s\" &", base, folder);
+    system(cmd);
+    free(file_dup); free(dir_dup);
 }
 
 void manage_cache_size() {
@@ -78,15 +70,8 @@ void manage_cache_size() {
 
 void* cleanup_services(void* arg) {
     // 1. Kill players/compositors immediately
-    if (vfork() == 0) {
-        execlp("pkill", "pkill", "-9", "qua-player", NULL);
-        _exit(1);
-    }
-    
-    if (vfork() == 0) {
-        execlp("pkill", "pkill", "-9", "picom", NULL);
-        _exit(1);
-    }
+    system("pkill -9 qua-player 2>/dev/null &");
+    system("pkill -9 picom 2>/dev/null &");
     
     // 2. Parallel stop for Pipewire/Sound infrastructure
     const char *services[] = {
@@ -96,10 +81,9 @@ void* cleanup_services(void* arg) {
     };
 
     for (int i = 0; services[i] != NULL; i++) {
-        if (vfork() == 0) {
-            execlp("systemctl", "systemctl", "--user", "stop", services[i], NULL);
-            _exit(1);
-        }
+        char buffer[256];
+        snprintf(buffer, sizeof(buffer), "systemctl --user stop %s 2>/dev/null &", services[i]);
+        system(buffer);
     }
     return NULL;
 }
@@ -118,105 +102,54 @@ void* convert_audio(void* arg) {
 
     char tmp[PATH_MAX];
     snprintf(tmp, sizeof(tmp), "/dev/shm/raw-%d.wav", getpid());
+    char cmd[PATH_MAX * 2];
 
     char *ext = strrchr(data->target_file, '.');
     
-    // Optimized native decoder selection with direct execution
-    pid_t pid;
+    // Optimized native decoder selection
     if (ext && strcasecmp(ext, ".flac") == 0) {
-        if ((pid = vfork()) == 0) {
-            execlp("flac", "flac", "-d", "-s", "-f", data->target_file, "-o", tmp, NULL);
-            _exit(1);
-        }
+        snprintf(cmd, sizeof(cmd), "flac -d -s -f \"%s\" -o \"%s\"", data->target_file, tmp);
     } 
     else if (ext && strcasecmp(ext, ".wv") == 0) {
-        if ((pid = vfork()) == 0) {
-            execlp("wvunpack", "wvunpack", "-q", "-y", data->target_file, "-o", tmp, NULL);
-            _exit(1);
-        }
+        snprintf(cmd, sizeof(cmd), "wvunpack -q -y \"%s\" -o \"%s\"", data->target_file, tmp);
     } 
     else if (ext && strcasecmp(ext, ".ape") == 0) {
-        if ((pid = vfork()) == 0) {
-            execlp("mac", "mac", data->target_file, tmp, "-d", NULL);
-            _exit(1);
-        }
+        // Monkey's Audio native decoder
+        snprintf(cmd, sizeof(cmd), "mac \"%s\" \"%s\" -d", data->target_file, tmp);
     }
     else if (ext && (strcasecmp(ext, ".opus") == 0 || strcasecmp(ext, ".ogg") == 0)) {
-        if ((pid = vfork()) == 0) {
-            execlp("opusdec", "opusdec", "--quiet", data->target_file, tmp, NULL);
-            _exit(1);
-        }
+        // Opus/Ogg native tools are extremely fast
+        snprintf(cmd, sizeof(cmd), "opusdec --quiet \"%s\" \"%s\"", data->target_file, tmp);
     }
     else if (ext && (strcasecmp(ext, ".aiff") == 0 || strcasecmp(ext, ".aif") == 0)) {
-        if ((pid = vfork()) == 0) {
-            execlp("sox", "sox", data->target_file, tmp, NULL);
-            _exit(1);
-        }
+        // SoX handles AIFF to WAV conversion natively (very fast)
+        snprintf(cmd, sizeof(cmd), "sox \"%s\" \"%s\"", data->target_file, tmp);
     }
     else {
-        if ((pid = vfork()) == 0) {
-            execlp("ffmpeg", "ffmpeg", "-v", "quiet", "-i", data->target_file, 
-                   "-f", "wav", "-y", tmp, NULL);
-            _exit(1);
-        }
+        // Fallback for m4a, mp4, mp3, etc.
+        snprintf(cmd, sizeof(cmd), "ffmpeg -v quiet -i \"%s\" -f wav -y \"%s\"", data->target_file, tmp);
     }
-    
-    if (pid > 0) waitpid(pid, NULL, 0);
 
-    // Query audio properties
+    system(cmd);
+
     char buf[32];
-    int bd = 32, sr = 96000, ch = 2;
-    
-    FILE *fp;
-    if ((pid = vfork()) == 0) {
-        int pipefd[2];
-        pipe(pipefd);
-        dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[0]);
-        close(pipefd[1]);
-        execlp("soxi", "soxi", "-p", tmp, NULL);
-        _exit(1);
-    }
-    fp = popen("echo", "r");  // Placeholder - needs proper pipe handling
-    if (fp) { if (fgets(buf, 32, fp)) bd = atoi(buf); pclose(fp); }
-    
-    // Simplified: use system() for soxi queries (complex pipe handling)
-    char cmd[PATH_MAX * 2];
     snprintf(cmd, sizeof(cmd), "soxi -p \"%s\"", tmp);
-    fp = popen(cmd, "r"); if (fp) { fgets(buf, 32, fp); pclose(fp); bd = atoi(buf); }
-    
+    FILE *fp = popen(cmd, "r"); fgets(buf, 32, fp); pclose(fp); int bd = atoi(buf);
     snprintf(cmd, sizeof(cmd), "soxi -r \"%s\"", tmp);
-    fp = popen(cmd, "r"); if (fp) { fgets(buf, 32, fp); pclose(fp); sr = atoi(buf); }
-    
+    fp = popen(cmd, "r"); fgets(buf, 32, fp); pclose(fp); int sr = atoi(buf);
     snprintf(cmd, sizeof(cmd), "soxi -c \"%s\"", tmp);
-    fp = popen(cmd, "r"); if (fp) { fgets(buf, 32, fp); pclose(fp); ch = atoi(buf); }
+    fp = popen(cmd, "r"); fgets(buf, 32, fp); pclose(fp); int ch = atoi(buf);
 
     if (bd != 16 && bd != 32) bd = 32;
     if (sr < 44100) sr = 96000;
 
-    snprintf(data->cache_file, PATH_MAX, "%s/%s-%d-%d.wav", CACHE_DIR, data->pattern, bd, sr);
+    char remix[128] = "";
+    if (ch == 1) strcpy(remix, "channels 2");
+    else if (ch == 6) strcpy(remix, "remix 1,3v0.707,5v0.707 2,3v0.707,6v0.707");
 
-    // Build sox arguments
-    char bd_str[8], sr_str[16];
-    snprintf(bd_str, sizeof(bd_str), "%d", bd);
-    snprintf(sr_str, sizeof(sr_str), "%d", sr);
-    
-    if ((pid = vfork()) == 0) {
-        if (ch == 1) {
-            execlp("sox", "sox", tmp, "-b", bd_str, "-e", "signed-integer", 
-                   data->cache_file, "channels", "2", "rate", "-v", sr_str, NULL);
-        } else if (ch == 6) {
-            execlp("sox", "sox", tmp, "-b", bd_str, "-e", "signed-integer",
-                   data->cache_file, "remix", "1,3v0.707,5v0.707", "2,3v0.707,6v0.707",
-                   "rate", "-v", sr_str, NULL);
-        } else {
-            execlp("sox", "sox", tmp, "-b", bd_str, "-e", "signed-integer",
-                   data->cache_file, "rate", "-v", sr_str, NULL);
-        }
-        _exit(1);
-    }
-    
-    if (pid > 0) waitpid(pid, NULL, 0);
+    snprintf(data->cache_file, PATH_MAX, "%s/%s-%d-%d.wav", CACHE_DIR, data->pattern, bd, sr);
+    snprintf(cmd, sizeof(cmd), "sox \"%s\" -b %d -e signed-integer \"%s\" %s rate -v %d", tmp, bd, data->cache_file, remix, sr);
+    system(cmd);
     unlink(tmp);
     return NULL;
 }
@@ -345,11 +278,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Execute the chosen player with vfork
+    // Execute the chosen player
     if (p_full[0] != '\0') {
-        if (vfork() == 0) {
-            execlp("qua-bare-launcher", "qua-bare-launcher", "4", p_full, 
-                   data.cache_file, "hw:0,0", NULL);
+        if (fork() == 0) {
+            char *launch[] = {"qua-bare-launcher", "4", p_full, data.cache_file, "hw:0,0", NULL};
+            execvp(launch[0], launch);
             _exit(1);
         }
     } else {

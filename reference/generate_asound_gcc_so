@@ -1,0 +1,150 @@
+#!/bin/sh
+
+# ALSA Library LTO Build Script (GCC, Shared Library)
+# This script downloads, patches, and compiles ALSA library with aggressive LTO optimizations
+
+set -e  # Exit on any error
+
+# Source external URLs
+ALSA_URL="https://www.alsa-project.org/files/pub/lib/alsa-lib-1.2.14.tar.bz2"
+
+# Configuration
+ALSA_VERSION="1.2.14"
+WORK_DIR="/tmp"
+BUILD_DIR="${WORK_DIR}/alsa-lib-${ALSA_VERSION}"
+LIB_DIR="$(pwd)/lib"
+
+echo "=== ALSA Library LTO Build Script (GCC, Shared) ==="
+echo "Version: ${ALSA_VERSION}"
+echo "Build directory: ${BUILD_DIR}"
+echo "Output directory: ${LIB_DIR}"
+echo
+
+# Create lib directory
+mkdir -p "$LIB_DIR"
+
+# Step 1: Download and extract ALSA library
+echo "Step 1: Downloading and extracting ALSA library..."
+cd "${WORK_DIR}"
+wget "${ALSA_URL}"
+tar -xjf "alsa-lib-${ALSA_VERSION}.tar.bz2"
+cd "${BUILD_DIR}"
+
+# Step 2: Patch libtool to prevent LTO disabling
+echo "Step 2: Patching libtool to preserve LTO flags..."
+echo "Finding -fno-lto references:"
+grep -n "\-fno-lto" m4/libtool.m4 ltmain.sh || echo "No -fno-lto flags found initially"
+
+# Comment out any lines that add -fno-lto (the key fix!)
+sed -i 's/.*-fno-lto.*/# &/' m4/libtool.m4
+sed -i 's/.*-fno-lto.*/# &/' ltmain.sh
+
+echo "Patched files - -fno-lto lines have been commented out"
+
+# Step 3: Regenerate build system
+echo "Step 3: Regenerating build system with patched libtool..."
+autoreconf -fiv
+
+# Step 4: Clean any previous builds
+echo "Step 4: Cleaning previous builds..."
+make distclean 2>/dev/null || true
+
+# Step 5: Configure with aggressive LTO optimizations
+echo "Step 5: Configuring with aggressive LTO optimizations..."
+
+# Check for GCC LTO tools and set accordingly
+if command -v gcc-ar >/dev/null 2>&1; then
+    echo "Using GCC LTO-aware tools (gcc-ar, gcc-ranlib, gcc-nm)"
+    export AR=gcc-ar
+    export RANLIB=gcc-ranlib
+    export NM=gcc-nm
+else
+    echo "Warning: gcc-ar not found, using standard tools (LTO may be limited)"
+    export AR=ar
+    export RANLIB=ranlib
+    export NM=nm
+fi
+
+# Set environment variables
+export CC=gcc
+export CFLAGS="-march=native -mtune=native -O3 -flto=auto -fPIC"
+export LDFLAGS="-flto=auto"
+
+./configure \
+    --enable-shared --disable-static \
+    --disable-mixer --disable-rawmidi --disable-hwdep --disable-seq \
+    --disable-ucm --disable-topology \
+    --with-versioned \
+    --disable-resmgr \
+    --disable-aload \
+    \
+    --with-pcm-plugins="" \
+    --with-ctl-plugins="" \
+    \
+    --with-debug=no \
+    --disable-thread-safety \
+    --with-libdl=no \
+    --with-pthread=no \
+    --with-librt=no \
+    --with-wordexp=no \
+    --disable-python
+
+export CFLAGS="-march=native -mtune=native -O3 \
+    -flto=auto \
+    -flto-partition=one \
+    -fno-fat-lto-objects \
+    -fwhole-program \
+    -funroll-loops \
+    -ftree-vectorize \
+    -fno-math-errno \
+    -fno-trapping-math \
+    -fno-signed-zeros \
+    -fassociative-math \
+    -freciprocal-math \
+    -ffast-math \
+    -fomit-frame-pointer \
+    -ffunction-sections \
+    -fdata-sections \
+    -fmerge-all-constants \
+    -finline-stringops \
+    -fallow-store-data-races \
+    -fno-plt -fPIE"
+    
+export LDFLAGS="-flto=auto \
+    -flto-partition=one \
+    -fuse-ld=gold \
+    -Wl,--gc-sections \
+    -Wl,--strip-all \
+    -Wl,--hash-style=gnu \
+    -Wl,--as-needed \
+    -Wl,-O3 \
+    -Wl,--icf=all"
+
+# Step 6: Build the library
+echo "Step 6: Building ALSA library with LTO..."
+make -j$(nproc)
+
+# Step 7: Install the optimized library
+echo "Step 7: Installing LTO-optimized library..."
+cp src/.libs/libasound.so* "$LIB_DIR/"
+# Also check if we can extract symbols
+echo "Checking exported symbols..."
+nm -D "$LIB_DIR"/libasound.so.2.0.0 | grep -E "snd_pcm_hw_params_set_(buffer|period)_size_near" || echo "WARNING: Missing expected symbols!"
+
+# Step 8: Verify LTO worked
+echo "Step 8: Verifying shared library..."
+echo "Shared libraries installed:"
+ls -lh "$LIB_DIR"/libasound.so*
+echo
+echo "Library information:"
+file "$LIB_DIR"/libasound.so.* 2>/dev/null || file "$LIB_DIR"/libasound.so
+
+echo
+echo "=== Build Complete ==="
+echo "LTO-optimized ALSA shared library installed to: $LIB_DIR/"
+echo
+echo "To use this library in your projects, link with:"
+echo "  -L$LIB_DIR -lasound"
+echo
+echo "You may also need to add to LD_LIBRARY_PATH:"
+echo "  export LD_LIBRARY_PATH=$LIB_DIR:\$LD_LIBRARY_PATH"

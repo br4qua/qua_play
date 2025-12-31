@@ -1,0 +1,11 @@
+#!/bin/sh
+vis-on &
+
+pkill -9 qua-player
+
+# Wait for qua-player to actually die
+while ps -p $(pgrep qua-player) > /dev/null 2>&1; do
+    sleep 0.1
+done
+
+aud-on &

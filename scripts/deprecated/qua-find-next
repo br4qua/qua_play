@@ -1,0 +1,61 @@
+#!/bin/sh
+WRITE_TO_FILE=0
+OFFSET_ARG=1
+
+# Description
+# Note: Will not work if a file contains newline character
+
+for arg in "$@"; do
+    if [ "$arg" = "-t" ]; then
+        WRITE_TO_FILE=1
+    else
+        case "$arg" in
+            -[0-9]*|[0-9]*)
+                OFFSET_ARG="$arg"
+                ;;
+        esac
+    fi
+done
+
+qua_find() {
+    FILE="$1"
+    OFFSET="$2"
+    DIR=$(dirname "$FILE")
+    
+    # Collect and sort files (newline-delimited string)
+    files=$(
+        for f in "$DIR"/*.flac "$DIR"/*.mp3 "$DIR"/*.wv "$DIR"/*.m4a; do
+            [ -f "$f" ] && printf '%s\n' "$f"
+        done | sort
+    )
+    
+    # Count total files
+    total=$(printf '%s\n' "$files" | grep -c .)
+    [ "$total" -eq 0 ] && return 1
+    
+    # Find current file index
+    i=0
+    while IFS= read -r current_file; do
+        if [ "$current_file" = "$FILE" ]; then
+            # Calculate wrapped index
+            next_index=$(( (i + OFFSET) % total ))
+            [ "$next_index" -lt 0 ] && next_index=$(( next_index + total ))
+            
+            # Extract the nth file
+            printf '%s\n' "$files" | sed -n "$((next_index + 1))p"
+            return 0
+        fi
+        i=$((i + 1))
+    done <<EOF
+$files
+EOF
+    
+    # Return first file if current not found
+    printf '%s\n' "$files" | sed -n '1p'
+}
+
+CURRENT=$(cat /tmp/qua-current-song 2>/dev/null)
+NEXT=$(qua_find "$CURRENT" "$OFFSET_ARG")
+
+printf '%s' "$NEXT"
+[ "$WRITE_TO_FILE" -eq 1 ] && printf '%s' "$NEXT" > /tmp/qua-current-song

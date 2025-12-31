@@ -1,0 +1,209 @@
+#!/bin/sh
+
+# Parse flags
+OFFSET=""
+FILE_ARG=""
+# Player binaries path
+PLAYER_16_BIT=qua-player-16
+PLAYER_32_BIT=qua-player-32
+NUKE_SUFFIX=".pgo5..bolt3"
+
+# Configurations
+DEVICE="hw:0,0"			# Playback device
+CORES="4"				# Which core(s) you want the player to play on. Example: "0,1,2" or "3". 
+VALID_BIT_DEPTH="16 32" # List of valid Bit-depths your hardware supports.
+FORCE_BIT_DEPTH=false      # Force playback at a specific sample rate. Options: false OR user define value
+FALLBACK_BIT_DEPTH=32	# Fallback bit-depth, used when detected bit-depth is not within VALID_BIT_DEPTH
+VALID_SAMPLE_RATES="44100 48000 88200 96000 176400 192000 352800 384000" # List of valid sample rates
+FORCE_SAMPLE_RATE=false # Force playback at a specific sample rate. Options: false OR sample rate Example: "96000" 
+FALLBACK_SAMPLE_RATE=96000 # Fallback bit-depth, used when detected bit-depth is not within VALID_BIT_DEPTH
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n)
+            OFFSET="$2"
+            shift 2
+            ;;
+        *)
+            FILE_ARG="$1"
+            shift
+            ;;
+    esac
+done
+
+# Determine which file to play
+if [ -n "$OFFSET" ] && [ "$OFFSET" != "0" ]; then
+    # Use offset from current song (non-zero offset)
+    CURRENT=$(cat /tmp/qua-current-song 2>/dev/null)
+    
+    # === INLINED qua_find logic ===
+    DIR=$(dirname "$CURRENT")
+    
+    # Collect and sort files (newline-delimited string)
+    files=$(
+        for f in "$DIR"/*.flac "$DIR"/*.mp3 "$DIR"/*.wv "$DIR"/*.m4a; do
+            [ -f "$f" ] && printf '%s\n' "$f"
+        done | sort
+    )
+    
+    # Count total files
+    total=$(printf '%s\n' "$files" | grep -c .)
+    
+    if [ "$total" -eq 0 ]; then
+        FILE=""
+    else
+        # Find current file index
+        i=0
+        found=0
+        while IFS= read -r current_file; do
+            if [ "$current_file" = "$CURRENT" ]; then
+                # Calculate wrapped index
+                next_index=$(( (i + OFFSET) % total ))
+                [ "$next_index" -lt 0 ] && next_index=$(( next_index + total ))
+                
+                # Extract the nth file
+                FILE=$(printf '%s\n' "$files" | sed -n "$((next_index + 1))p")
+                found=1
+                break
+            fi
+            i=$((i + 1))
+        done <<EOF
+$files
+EOF
+        
+        # Return first file if current not found
+        [ "$found" -eq 0 ] && FILE=$(printf '%s\n' "$files" | sed -n '1p')
+    fi
+    # === END INLINED qua_find logic ===
+    
+elif [ -n "$FILE_ARG" ]; then
+    # Explicit file provided
+    FILE="$FILE_ARG"
+else
+    # No args or offset is 0 - resume last song
+    FILE=$(cat /tmp/qua-current-song 2>/dev/null)
+fi
+
+
+
+echo $FILE
+
+# clear_previous_instances
+pkill -9 qua-player 2>/dev/null &
+# stop_system_services
+pkill -9 picom &
+systemctl --user stop pipewire-pulse.socket &
+systemctl --user stop pipewire.socket &
+systemctl --user stop pipewire-pulse.service &
+systemctl --user stop wireplumber.service &
+systemctl --user stop pipewire.service &
+# cleanup
+rm -f /dev/shm/sa-temp-*.wav 2>/dev/null
+# setup_format
+EXT="${FILE##*.}"
+if [ "$EXT" = "flac" ]; then
+    detected_bit_depth=$(metaflac --show-bps "$FILE" 2>/dev/null)
+else
+    detected_bit_depth=$(soxi -p "$FILE" 2>/dev/null)
+fi
+echo "Detected bit-depth: $detected_bit_depth"
+
+# Todo: Clean up logic a bit -> Fallback Rate, then Detected Rate, then Forced Rate
+if [ "$FORCE_BIT_DEPTH" != "false" ]; then
+    playback_bit_depth="$FORCE_BIT_DEPTH"
+#   echo "Playback using FORCED $playback_bit_depth bits"
+else
+    # Check if detected bit depth is valid
+    playback_bit_depth="$FALLBACK_BIT_DEPTH"
+    for bit_depth in $VALID_BIT_DEPTH; do
+        if [ "$detected_bit_depth" = "$bit_depth" ]; then
+            playback_bit_depth="$detected_bit_depth"
+            break
+        fi
+    done
+#   echo "Playback using $playback_bit_depth bits"
+fi
+
+if [ "$playback_bit_depth" = "16" ]; then
+    PLAYER="$PLAYER_16_BIT"
+else
+    PLAYER="$PLAYER_32_BIT"
+fi
+
+# Determining Sample Rate for playback
+if [ "$EXT" = "flac" ]; then
+    detected_sample_rate=$(metaflac --show-sample-rate "$FILE" 2>/dev/null)
+else
+    detected_sample_rate=$(soxi -r "$FILE" 2>/dev/null)
+fi
+echo "Detected sample rate: $detected_sample_rate Hz"
+
+# Todo: Clean up logic a bit -> Fallback Rate, then Detected Rate, then Forced Rate
+if [ "$FORCE_SAMPLE_RATE" != "false" ]; then
+    playback_sample_rate="$FORCE_SAMPLE_RATE"
+#    echo "Playback using FORCED $playback_sample_rate Hz"
+else
+    # Check if detected sample rate is valid
+    playback_sample_rate="$FALLBACK_SAMPLE_RATE"
+    for rate in $VALID_SAMPLE_RATES; do
+        if [ "$detected_sample_rate" = "$rate" ]; then
+            playback_sample_rate="$detected_sample_rate"
+            break
+        fi
+    done
+#    echo "Playback using $playback_sample_rate Hz"
+fi
+# wav_conversion
+TEMP_WAV_INTERMEDIATE="/dev/shm/sa-temp-raw-$$.wav"
+   case "$EXT" in
+       "flac")
+           flac -d "$FILE" -o "$TEMP_WAV_INTERMEDIATE" ;;
+       "wv")
+           wvunpack "$FILE" -o "$TEMP_WAV_INTERMEDIATE" ;;
+       "ape")
+           mac "$FILE" -d "$TEMP_WAV_INTERMEDIATE" ;;
+       "mp3")
+           mpg123 -w "$TEMP_WAV_INTERMEDIATE" "$FILE" ;;
+       "opus")
+       	# or --no-dither
+           opusdec --force-wav "$FILE" "$TEMP_WAV_INTERMEDIATE" ;;
+       "ogg")
+           oggdec "$FILE" -o "$TEMP_WAV_INTERMEDIATE" ;;
+       "m4a"|"mp4"|"wav"|"aiff"|"aif")
+           ffmpeg -v quiet -i "$FILE" -f wav "$TEMP_WAV_INTERMEDIATE" ;;
+       *)
+           echo "Unsupported file format: ${FILE##*.}"
+           exit 1
+       ;;
+   esac
+# post_processing
+TEMP_WAV_PLAYBACK="/dev/shm/sa-temp-playback-$$.wav"
+DETECTED_CHANNELS=$(soxi -c "$TEMP_WAV_INTERMEDIATE" 2>/dev/null)
+REMIX_COMMAND=""
+case "$DETECTED_CHANNELS" in
+    1)
+        REMIX_COMMAND="channels 2"
+        ;;
+    6)
+        REMIX_COMMAND="remix 1,3v0.707,5v0.707 2,3v0.707,6v0.707"
+        playback_bit_depth=32
+        ;;
+    *)
+        ;;
+esac
+# Apply all SoX processing in one go
+sox -V3 "$TEMP_WAV_INTERMEDIATE" -t wav -b "$playback_bit_depth" -e signed-integer \
+    "$TEMP_WAV_PLAYBACK" $REMIX_COMMAND rate -v "$playback_sample_rate" \
+    # pad 0.1 0.1 # Increase to see if your hardware keep up during sample rate change
+# playback
+PLAYER_NAME="qua-player-${playback_bit_depth}-${playback_sample_rate}"
+NUKE_PLAYER="$PLAYER_NAME$NUKE_SUFFIX"
+if command -v "$NUKE_PLAYER" >/dev/null 2>&1; then
+    PLAYER="$NUKE_PLAYER"
+else
+    PLAYER="$PLAYER_NAME"
+fi
+PLAYER_FULL=$(which "$PLAYER")
+printf '%s' "$FILE" > /tmp/qua-current-song
+bare-launcher 4 "$(realpath "$PLAYER_FULL")" "$TEMP_WAV_PLAYBACK" "$DEVICE" &
+exit 0

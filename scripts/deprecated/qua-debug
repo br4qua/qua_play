@@ -1,0 +1,17 @@
+#!/bin/sh
+
+# Kill any existing processes and wait
+qua-stop
+
+# Wait for processes to actually terminate (max 10 iterations)
+count=0
+while [ $count -lt 10 ]; do
+    if ! pgrep -f "aplay|qua_" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.01
+    count=$((count + 1))
+done
+
+qua_setup "$1" 
+

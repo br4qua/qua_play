@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+import sys
+try:
+    import dbus
+    import dbus.service
+    from dbus.mainloop.glib import DBusGMainLoop
+    from gi.repository import GLib
+except ImportError as e:
+    print(f"Error: Missing dependency - {e}", file=sys.stderr)
+    print("Install: python3-dbus python3-gi", file=sys.stderr)
+    sys.exit(1)
+
+import subprocess
+
+DBusGMainLoop(set_as_default=True)
+
+class QuaMPRIS(dbus.service.Object):
+    def __init__(self):
+        bus_name = dbus.service.BusName('org.mpris.MediaPlayer2.qua', bus=dbus.SessionBus())
+        dbus.service.Object.__init__(self, bus_name, '/org/mpris/MediaPlayer2')
+    
+    # @dbus.service.method('org.mpris.MediaPlayer2.Player')
+    # def Next(self):
+    #     subprocess.run(['qua-find-next', '-t', '1'])
+    #     subprocess.run(['qua-play'], 
+    #            stdout=subprocess.DEVNULL, 
+    #            stderr=subprocess.DEVNULL)
+    
+    # @dbus.service.method('org.mpris.MediaPlayer2.Player')
+    # def Previous(self):
+    #     subprocess.run(['qua-find-next', '-t', '-1'])
+    #     subprocess.run(['qua-play'], 
+    #            stdout=subprocess.DEVNULL, 
+    #            stderr=subprocess.DEVNULL)
+    # @dbus.service.method('org.mpris.MediaPlayer2.Player')
+    # def Stop(self):
+    #     subprocess.run(['qua-stop'])
+    
+    # @dbus.service.method('org.mpris.MediaPlayer2.Player')
+    # def Play(self):
+    #     print("MPRIS: Play() called", file=sys.stderr, flush=True)
+    #     subprocess.run(['qua-find-next', '-t', '0'])
+    #     subprocess.run(['qua-play'], 
+    #            stdout=subprocess.DEVNULL, 
+    #            stderr=subprocess.DEVNULL)
+    @dbus.service.method('org.mpris.MediaPlayer2.Player')
+    def Next(self):
+        subprocess.run(['qua-find-next', '-t', '1'],
+               stdout=subprocess.DEVNULL, 
+               stderr=subprocess.DEVNULL)
+        subprocess.Popen(['qua-play'], 
+                 stdin=subprocess.DEVNULL,
+                 stdout=subprocess.DEVNULL, 
+                 stderr=subprocess.DEVNULL,
+                 start_new_session=True)
+    
+    @dbus.service.method('org.mpris.MediaPlayer2.Player')
+    def Previous(self):
+        subprocess.run(['qua-find-next', '-t', '-1'],
+               stdout=subprocess.DEVNULL, 
+               stderr=subprocess.DEVNULL)
+        subprocess.Popen(['qua-play'], 
+                 stdin=subprocess.DEVNULL,
+                 stdout=subprocess.DEVNULL, 
+                 stderr=subprocess.DEVNULL,
+                 start_new_session=True)
+    
+    @dbus.service.method('org.mpris.MediaPlayer2.Player')
+    def Stop(self):
+        subprocess.run(['qua-stop'])
+    
+    @dbus.service.method('org.mpris.MediaPlayer2.Player')
+    def Play(self):
+        # print("MPRIS: Play() called", file=sys.stderr, flush=True)
+        subprocess.run(['qua-find-next', '-t', '0'],
+               stdout=subprocess.DEVNULL, 
+               stderr=subprocess.DEVNULL)
+        subprocess.Popen(['qua-play'], 
+                 stdin=subprocess.DEVNULL,
+                 stdout=subprocess.DEVNULL, 
+                 stderr=subprocess.DEVNULL,
+                 start_new_session=True)
+        
+    @dbus.service.method('org.mpris.MediaPlayer2.Player')
+    def Pause(self):
+        subprocess.run(['qua-stop', '0'])
+    
+    @dbus.service.method('org.mpris.MediaPlayer2.Player')
+    def PlayPause(self):
+        subprocess.run(['qua-stop', '0'])
+        
+    # Required MPRIS2 properties
+    @dbus.service.method('org.freedesktop.DBus.Properties', in_signature='ss', out_signature='v')
+    def Get(self, interface, prop):
+        if interface == 'org.mpris.MediaPlayer2.Player':
+            if prop == 'PlaybackStatus':
+                return 'Playing'
+            if prop == 'CanControl':
+                return True
+            if prop == 'CanGoNext':
+                return True
+            if prop == 'CanGoPrevious':
+                return True
+            if prop == 'CanPlay':
+                return True
+            if prop == 'CanPause':
+                return True
+        elif interface == 'org.mpris.MediaPlayer2':
+            if prop == 'Identity':
+                return 'Qua'
+            if prop == 'CanQuit':
+                return False
+            if prop == 'CanRaise':
+                return False
+        return dbus.String('')
+    
+    @dbus.service.method('org.freedesktop.DBus.Properties', in_signature='s', out_signature='a{sv}')
+    def GetAll(self, interface):
+        if interface == 'org.mpris.MediaPlayer2.Player':
+            return {
+                'PlaybackStatus': 'Playing',
+                'CanControl': True,
+                'CanGoNext': True,
+                'CanGoPrevious': True,
+                'CanPlay': True,
+                'CanPause': True,
+            }
+        elif interface == 'org.mpris.MediaPlayer2':
+            return {
+                'Identity': 'Qua',
+                'CanQuit': False,
+                'CanRaise': False,
+            }
+        return {}
+    
+    @dbus.service.method('org.mpris.MediaPlayer2')
+    def Raise(self):
+        pass
+    
+    @dbus.service.method('org.mpris.MediaPlayer2')
+    def Quit(self):
+        pass
+
+if __name__ == '__main__':
+    try:
+        print("Starting qua MPRISx adapter...", file=sys.stderr)
+        QuaMPRIS()
+        print("qua registered on D-Bus", file=sys.stderr)
+        loop = GLib.MainLoop()
+        loop.run()
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)

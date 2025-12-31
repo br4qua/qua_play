@@ -1,0 +1,212 @@
+#!/bin/sh
+
+FILE="$1"
+
+# Player binaries path
+PLAYER_16_BIT=qua-player-16
+PLAYER_32_BIT=qua-player-32
+
+# Configurations
+DEVICE="hw:0,0"			# Playback device
+CORES="4"				# Which core(s) you want the player to play on. Example: "3,4,5" or "2". This is zero indexed.
+VALID_BIT_DEPTH="16 32" # List of valid Bit-depths your hardware supports.
+FORCE_BIT_DEPTH=false      # Force playback at a specific sample rate. Options: false OR user define value
+FALLBACK_BIT_DEPTH=32	# Fallback bit-depth, used when detected bit-depth is not within VALID_BIT_DEPTH
+VALID_SAMPLE_RATES="44100 48000 88200 96000 176400 192000 352800 384000" # List of valid sample rates
+FORCE_SAMPLE_RATE=false # Force playback at a specific sample rate. Options: false OR user define value
+FALLBACK_SAMPLE_RATE=96000 # Fallback bit-depth, used when detected bit-depth is not within VALID_BIT_DEPTH
+
+
+clear_previous_instances() {
+	pkill -9 qua-player >/dev/null 2>&1
+	pkill -9 aplay >/dev/null 2>&1 & 
+
+	count=0
+	while [ $count -lt 10 ]; do
+	    if ! pgrep -f "aplay|qua-" >/dev/null 2>&1; then
+	        break
+	    fi
+	    sleep 0.01
+	    count=$((count + 1))
+	done
+}
+
+stop_system_services(){
+vis-off &
+aud-off
+}
+
+setup_format() {
+    # Get file extension first
+    EXT="${FILE##*.}"
+    
+    # Determining Bit-Depth for playback
+    if [ "$EXT" = "flac" ]; then
+        detected_bit_depth=$(metaflac --show-bps "$FILE" 2>/dev/null)
+    else
+        detected_bit_depth=$(soxi -p "$FILE" 2>/dev/null)
+    fi
+    echo "Detected bit-depth: $detected_bit_depth"
+    
+    # Todo: Clean up logic a bit -> Fallback Rate, then Detected Rate, then Forced Rate
+    if [ "$FORCE_BIT_DEPTH" != "false" ]; then
+        playback_bit_depth="$FORCE_BIT_DEPTH"
+        echo "Playback using FORCED $playback_bit_depth bits"
+    else
+        # Check if detected bit depth is valid
+        playback_bit_depth="$FALLBACK_BIT_DEPTH"
+        for bit_depth in $VALID_BIT_DEPTH; do
+            if [ "$detected_bit_depth" = "$bit_depth" ]; then
+                playback_bit_depth="$detected_bit_depth"
+                break
+            fi
+        done
+        echo "Playback using $playback_bit_depth bits"
+    fi
+    
+    if [ "$playback_bit_depth" = "16" ]; then
+        PLAYER="$PLAYER_16_BIT"
+    else
+        PLAYER="$PLAYER_32_BIT"
+    fi
+    
+    # Determining Sample Rate for playback
+    if [ "$EXT" = "flac" ]; then
+        detected_sample_rate=$(metaflac --show-sample-rate "$FILE" 2>/dev/null)
+    else
+        detected_sample_rate=$(soxi -r "$FILE" 2>/dev/null)
+    fi
+    echo "Detected sample rate: $detected_sample_rate Hz"
+    
+    # Todo: Clean up logic a bit -> Fallback Rate, then Detected Rate, then Forced Rate
+    if [ "$FORCE_SAMPLE_RATE" != "false" ]; then
+        playback_sample_rate="$FORCE_SAMPLE_RATE"
+        echo "Playback using FORCED $playback_sample_rate Hz"
+    else
+        # Check if detected sample rate is valid
+        playback_sample_rate="$FALLBACK_SAMPLE_RATE"
+        for rate in $VALID_SAMPLE_RATES; do
+            if [ "$detected_sample_rate" = "$rate" ]; then
+                playback_sample_rate="$detected_sample_rate"
+                break
+            fi
+        done
+        echo "Playback using $playback_sample_rate Hz"
+    fi
+}
+
+wav_conversion() {
+    # Generate temp filename in shared memory
+    TEMP_WAV_INTERMEDIATE="/dev/shm/sa-temp-raw-$$.wav"
+    EXT="${FILE##*.}"
+    # Perform conversion based on file format
+    case "$EXT" in
+        "flac")
+            flac -d -c "$FILE" > "$TEMP_WAV_INTERMEDIATE"
+        ;;
+        "wv")
+            wvunpack "$FILE" -o "$TEMP_WAV_INTERMEDIATE"
+        ;;
+        "ape")
+            mac "$FILE" -d "$TEMP_WAV_INTERMEDIATE"
+        ;;
+        "mp3")
+            mpg123 -w "$TEMP_WAV_INTERMEDIATE" "$FILE"
+        ;;
+        "opus")
+        	# or --no-dither, TODO maybe add this as a generic flag up top
+            opusdec --force-wav "$FILE" "$TEMP_WAV_INTERMEDIATE"
+        ;;
+        "ogg")
+            oggdec "$FILE" -o "$TEMP_WAV_INTERMEDIATE"
+        ;;
+        "m4a"|"mp4"|"wav"|"aiff"|"aif")
+            ffmpeg -v quiet -i "$FILE" -f wav "$TEMP_WAV_INTERMEDIATE"
+        ;;
+        *)
+            echo "Unsupported file format: $EXT"
+            exit 1
+        ;;
+    esac
+}
+
+post_processing() {
+    # Generate final output filename
+    TEMP_WAV_PLAYBACK="/dev/shm/sa-temp-playback-$$.wav"
+
+    # Check the channel count of the intermediate file
+    detected_channels=$(soxi -c "$TEMP_WAV_INTERMEDIATE" 2>/dev/null)
+    
+    # Set the REMIX_COMMAND variable
+    REMIX_COMMAND=""
+        
+    # --- Logic Block 1: Mono (1 Channel) to Stereo (Dual-Mono) ---
+    if [ "$detected_channels" -eq 1 ]; then
+        echo "Input is Mono. Applying Dual-Mono conversion with -6dB gain."
+        # Use 'channels 2' to duplicate the mono channel to two channels.
+        # Add 'gain -6' to compensate for the acoustic summation (volume doubling).
+        REMIX_COMMAND="channels 2"
+        
+    # --- Logic Block 2: 6-Channel (5.1) Downmix to Stereo ---
+    elif [ "$detected_channels" -eq 6 ]; then
+        echo "Input is 6-Channel (5.1). Downmixing to Stereo with gain adjustments."
+        
+        # Standard passive downmix formula (L, R, C, LFE, SL, SR -> L', R'):
+        # L' = L + 0.707*C + 0.707*SL
+        # R' = R + 0.707*C + 0.707*SR
+        # This prevents clipping and maintains general loudness perception.
+        playback_bit_depth=32
+        REMIX_COMMAND="remix 1,3v0.707,5v0.707 2,3v0.707,6v0.707"
+    # --- Logic Block 3: All other channel counts (2, 3, 4, 5, 7, 8, etc.) ---
+    else
+        echo "Input is Stereo or Non-standard Multi-channel ($detected_channels channels). No adjustment needed."
+    fi
+
+    # Apply all SoX processing in one go
+    # The REMIX_COMMAND is included here, but only contains effects if the file was mono.
+    sox -V3 "$TEMP_WAV_INTERMEDIATE" -t wav -b "$playback_bit_depth" -e signed-integer \
+        "$TEMP_WAV_PLAYBACK" $REMIX_COMMAND rate -v "$playback_sample_rate" pad 0.2 0.1
+}
+
+playback() {
+PLAYER_NAME="qua-player-${playback_bit_depth}-${playback_sample_rate}"
+NUKE_PLAYER="${PLAYER_NAME}.pgo2.pgo-bolt2"
+
+# Use command -v to check if the .nuke version exists and is executable in PATH
+if command -v "$NUKE_PLAYER" >/dev/null 2>&1; then
+    PLAYER="$NUKE_PLAYER"
+else
+    PLAYER="$PLAYER_NAME"
+fi
+#cd "/"
+#taskset -c "$CORES" "$PLAYER" "$TEMP_WAV_PLAYBACK" "$DEVICE" &
+PLAYER_FULL=$(which "$PLAYER")
+echo "Starting playback using: $PLAYER_FULL"
+notify-send "Now Playing" "$PLAYER_FULL"
+#(setsid env -i nice -n -20 taskset -c "$CORES" "$PLAYER" "$TEMP_WAV_PLAYBACK" "$DEVICE" 0</dev/null 1>/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &) 0</dev/null 1>/dev/null 2>&1 3>&- 4>&- &
+#setsid env -i nice -n -20 taskset -c "$CORES" "$PLAYER_FULL" "$TEMP_WAV_PLAYBACK" "$DEVICE" 0</dev/null 1>/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- & exit 0
+
+#(exec setsid nice -n -20 taskset -c "$CORES" env -i setsid "$PLAYER_FULL" "$TEMP_WAV_PLAYBACK" "$DEVICE" 0</dev/null 1>/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- & exit 0) &
+#setsid nice -n -20 taskset -c "$CORES" env -i setsid "$PLAYER_FULL" "$TEMP_WAV_PLAYBACK" "$DEVICE" 0</dev/null 1>/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+
+# (setsid sh -c "exec nice -n -20 taskset -c \"$CORES\" env -i \"$PLAYER_FULL\" \"$TEMP_WAV_PLAYBACK\" \"$DEVICE\" 0</dev/null 1>/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &" &) &
+# exit 0
+exec nice -n -20 taskset -c $CORES env -i $PLAYER_FULL $TEMP_WAV_PLAYBACK $DEVICE 0</dev/null 1>/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+}
+
+cleanup() {
+    echo "Cleaning up temporary files..."
+    rm -f /dev/shm/sa-temp-*.wav 2>/dev/null
+    echo "Cleanup complete"
+}
+
+
+clear_previous_instances
+stop_system_services
+cleanup
+setup_format
+wav_conversion
+post_processing
+playback
+exit 0
+

@@ -1,0 +1,176 @@
+#!/bin/sh
+# ALSA Library LTO Build Script (GCC, Static Library)
+# This script downloads, patches, and compiles ALSA library with aggressive LTO optimizations
+set -e  # Exit on any error
+
+# Source external URLs
+ALSA_URL="https://www.alsa-project.org/files/pub/lib/alsa-lib-1.2.14.tar.bz2"
+
+# Configuration
+ALSA_VERSION="1.2.14"
+WORK_DIR="$(pwd)/tmp"
+BUILD_DIR="${WORK_DIR}/alsa-lib-${ALSA_VERSION}"
+LIB_DIR="$(pwd)/lib"
+
+echo "=== ALSA Library LTO Build Script (GCC, Static) - Final Corrected ==="
+echo "Version: ${ALSA_VERSION}"
+echo "Build directory: ${BUILD_DIR}"
+echo "Output directory: ${LIB_DIR}"
+echo
+
+# Create lib directory
+mkdir -p "$LIB_DIR"
+
+# Step 1: Download and extract ALSA library
+echo "Step 1: Checking for existing ALSA library source..."
+if [ -d "$BUILD_DIR" ];
+then
+    echo "Source directory '$BUILD_DIR' found. Skipping download and extraction."
+    cd "${BUILD_DIR}"
+else
+    echo "Source directory not found. Downloading and extracting ALSA library..."
+    mkdir -p "${WORK_DIR}"
+    cd "${WORK_DIR}"
+    wget "${ALSA_URL}"
+    tar -xjf "alsa-lib-${ALSA_VERSION}.tar.bz2"
+    cd "${BUILD_DIR}"
+fi
+
+# Step 2: Patch libtool to prevent LTO disabling
+echo "Step 2: Patching libtool to preserve LTO flags..."
+echo "Finding -fno-lto references:"
+grep -n "\-fno-lto" m4/libtool.m4 ltmain.sh || \
+echo "No -fno-lto flags found initially"
+
+# Comment out any lines that add -fno-lto (the key fix!)
+sed -i 's/.*-fno-lto.*/# &/' m4/libtool.m4
+sed -i 's/.*-fno-lto.*/# &/' ltmain.sh
+
+echo "Patched files - -fno-lto lines have been commented out"
+
+# Step 3: Regenerate build system
+echo "Step 3: Regenerating build system with patched libtool..."
+autoreconf -fiv
+
+# Step 4: Clean any previous builds
+echo "Step 4: Cleaning previous builds..."
+make distclean 2>/dev/null || \
+true
+
+# Step 5: Configure with aggressive LTO optimizations
+echo "Step 5: Configuring with aggressive LTO optimizations..."
+
+# Check for GCC LTO tools and set accordingly (keeping original GCC check)
+if command -v gcc-ar >/dev/null 2>&1;
+then
+    echo "Using GCC LTO-aware tools (gcc-ar, gcc-ranlib, gcc-nm)"
+    export AR=gcc-ar
+    export RANLIB=gcc-ranlib
+    export NM=gcc-nm
+else
+    echo "Warning: gcc-ar not found, using standard tools (LTO may be limited)"
+    export AR=ar
+    export RANLIB=ranlib
+    export NM=nm
+fi
+
+export CC=gcc
+
+# 5.1: Initial CFLAGS/AM_CFLAGS for configure (Minimal LTO to pass checks)
+# Using -flto=auto for configure
+export CFLAGS="-march=native -mtune=native -O3 -flto=auto"
+export AM_CFLAGS="$CFLAGS" 
+export LDFLAGS="-static -flto=auto"
+
+
+
+./configure \
+    --disable-shared --enable-static \
+    \
+    --with-pcm-plugins="" \
+    --with-ctl-plugins="" \
+    \
+    --disable-maintainer-mode \
+    --disable-largefile \
+    --disable-mixer \
+    --disable-rawmidi \
+    --disable-hwdep \
+    --disable-seq \
+    --disable-ucm \
+    --disable-topology \
+    --disable-aload \
+    --disable-resmgr \
+    --disable-old-symbols \
+    --disable-python \
+    --with-debug=no \
+    --disable-thread-safety \
+    --with-libdl=no \
+    --with-pthread=no \
+    --with-librt=no \
+    --with-wordexp=no \
+    --with-gnu-ld=yes \
+    --with-softfloat=no
+
+# 5.2: Aggressive CFLAGS/AM_CFLAGS for the actual build (Set right before make)
+# Using -flto=auto, as -flto=full is not supported by your GCC version.
+
+export CFLAGS="\
+-g0 \
+-O3 \
+-march=native \
+-mtune=native \
+-flto=auto \
+-flto-partition=one \
+-fomit-frame-pointer \
+-fno-stack-protector \
+-fipa-pta \
+-fdevirtualize-at-ltrans \
+-ftree-loop-distribution \
+-fivopts \
+-frename-registers \
+-fallow-store-data-races \
+-fno-plt \
+-ffunction-sections -fdata-sections \
+-no-pie"
+    
+export AM_CFLAGS="$CFLAGS" # CRITICAL: Guarantees LTO flags for compilation
+
+# Updated LDFLAGS: Using -flto=auto for compatibility.
+export LDFLAGS="\
+-static \
+-no-pie \
+-flto=auto \
+-flto-partition=one \
+-Wl,-O3 \
+-Wl,--gc-sections \
+-Wl,--as-needed \
+-Wl,--hash-style=gnu \
+-Wl,--strip-all \
+"
+
+# Step 6: Build the library
+echo "Step 6: Building ALSA static library with LTO..."
+make V=1 -j$(nproc)
+
+# Step 7: Install the optimized library
+echo "Step 7: Installing LTO-optimized static library..."
+cp src/.libs/libasound.a "$LIB_DIR/"
+
+# Step 8: Verification steps
+echo "Checking archive contents..."
+ar t "$LIB_DIR/libasound.a" | head -10
+echo "..."
+
+echo "Step 8: Verifying static library..."
+ls -lh "$LIB_DIR"/libasound.a
+file "$LIB_DIR"/libasound.a
+
+# Check if it contains LTO IR
+if readelf -h "$LIB_DIR"/libasound.a 2>/dev/null | grep -q "plugin"; then
+    echo "Note: Archive contains LTO intermediate representation"
+fi
+
+echo
+echo "=== Build Complete ==="
+echo "LTO-optimized ALSA static library installed to: $LIB_DIR/libasound.a"
+echo

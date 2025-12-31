@@ -1,0 +1,5 @@
+# For arch
+sudo pacman -S flac wavpack mac mpg123 opus-tools vorbis-tools ffmpeg sox
+#
+sudo apt install flac wavpack monkeys-audio mpg123 opus-tools vorbis-tools ffmpeg sox
+

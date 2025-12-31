@@ -1,12 +1,10 @@
 [Desktop Entry]
-Name=Qua Audio Player
-Comment=High-performance audio player with ALSA support
-Exec=qua_handler %f
-Icon=audio-x-generic
-Terminal=false
 Type=Application
-Categories=AudioVideo;Audio;Player;
-MimeType=audio/mpeg;audio/mp3;audio/wav;audio/x-wav;audio/flac;audio/x-flac;audio/ogg;audio/x-vorbis+ogg;audio/aac;audio/mp4;audio/x-m4a;audio/wma;audio/x-ms-wma;audio/aiff;audio/x-aiff;
-StartupNotify=true
+Name=Qua Audio Player (No UI)
+Comment=Play audio files with Qua via signals
+Exec=sh -c 'qua-signals; echo "$1" > "$HOME/.config/qua-player/current-song"; pkill -CONT qua-signals' sh %f
+MimeType=audio/mpeg;audio/mp3;audio/wav;audio/x-wav;audio/flac;audio/x-flac;audio/ogg;audio/x-vorbis+ogg;audio/aac;audio/mp4;audio/x-m4a;audio/wma;audio/x-ms-wma;audio/aiff;audio/x-aiff;audio/x-ape;audio/ape;
+Terminal=false
 NoDisplay=false
-Keywords=audio;music;player;sound;media;
+Categories=AudioVideo;Audio;Player;
+Icon=multimedia-audio-player

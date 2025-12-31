@@ -1,0 +1,90 @@
+# Compiler and flags
+CC = gcc
+
+# --------------------------------------------------------------------------
+# AGGRESSIVE CFLAGS (Max speed with -Ofast, register renaming, LTO)
+# Note: -Ofast includes -O3 + aggressive floating point math
+# --------------------------------------------------------------------------
+CFLAGS = -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Ofast\
+         -march=native -mtune=native \
+         -flto=auto -flto-partition=one -fno-fat-lto-objects \
+         -fmerge-all-constants \
+         -funroll-loops -ftree-vectorize \
+         -fomit-frame-pointer -fno-stack-protector \
+         -ffunction-sections -fdata-sections \
+         -fipa-pta -fdevirtualize-at-ltrans \
+         -ftree-loop-distribution -fivopts \
+         -frename-registers \
+         -fprefetch-loop-arrays \
+         -finline-stringops \
+         -fallow-store-data-races \
+         -fno-plt
+      
+# --------------------------------------------------------------------------
+# STABLE LDFLAGS (Compatible with GNU ld, retains LTO and garbage collection)
+# Incompatible flags like --icf=all and --sort-section=alignment are removed.
+# --------------------------------------------------------------------------
+LDFLAGS = -static \
+          -L./lib \
+          -flto=auto -flto-partition=one \
+          -Wl,--gc-sections \
+          -Wl,--strip-all \
+          -Wl,--as-needed \
+          -Wl,--hash-style=gnu
+          
+LIBS = -lasound -lm
+
+# Target and source
+TARGET = bin/qua_player_32
+SOURCE = src/qua_player_32.c
+
+# Installation directories
+PREFIX ?= /usr/local
+BINDIR = $(PREFIX)/bin
+SCRIPTS = qua_handler qua_setup
+APPLICATIONSDIR = /usr/share/applications
+DESKTOP_FILE = qua-audio-player.desktop
+
+# Default target
+all: $(TARGET)
+
+# Debug flags
+DEBUG_CFLAGS = -DDEBUG -g -O0
+
+# Debug build
+debug: CFLAGS = $(DEBUG_CFLAGS)
+debug: TARGET = bin/qua_player_32_debug
+debug: $(TARGET)
+
+# Build rule (Standard GCC order)
+$(TARGET): $(SOURCE) | bin
+	$(CC) $(CFLAGS) -o $(TARGET) $(SOURCE) $(LDFLAGS) $(LIBS)
+# Create bin directory
+bin:
+	mkdir -p bin
+	
+# Install target
+install: $(TARGET)
+	@echo "Installing Qua Audio Player..."
+	install -d $(BINDIR)
+	install -d $(APPLICATIONSDIR)
+	install -m 755 $(TARGET) $(BINDIR)/
+	install -m 755 $(SCRIPTS) $(BINDIR)/
+	install -m 644 $(DESKTOP_FILE) $(APPLICATIONSDIR)/
+	@echo "Updating desktop database..."
+	-update-desktop-database $(APPLICATIONSDIR) 2>/dev/null || true
+	@echo "Installation complete."
+	
+# Uninstall target
+uninstall:
+	@echo "Uninstalling Qua Audio Player..."
+	rm -f $(addprefix $(BINDIR)/, $(SCRIPTS))
+	rm -f $(BINDIR)/qua_player_32
+	rm -f $(APPLICATIONSDIR)/$(DESKTOP_FILE)
+	@echo "Uninstallation complete."
+
+.PHONY: all debug install uninstall clean
+
+# Clean target
+clean:
+	rm -rf bin

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec pkill -USR2 qua-signals </dev/null >/dev/null 2>&1

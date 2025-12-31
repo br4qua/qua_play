@@ -1,0 +1,5 @@
+#!/bin/sh
+
+pkill -9 qua-player >/dev/null 2>&1
+pkill -9 aplay >/dev/null 2>&1 & 
+vis-on &

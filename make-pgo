@@ -1,0 +1,185 @@
+#!/bin/bash
+
+# Configuration
+AUDIO_DIR="./test-audio"
+BIN_DIR="./bin"
+PROFILE_DIR="./pgo_data"
+INSTALL_DIR="/usr/local/bin"
+
+PGO_SUFFIX=".pgo8" 
+LAUNCHER="qua-bare-launcher"
+
+TARGETS=(
+    # 16-bit Targets
+    # "16:44100:16bit_44100.wav"
+    "16:48000:16bit_48000.wav"
+    # 32-bit Targets
+    # "32:44100:32bit_44100.wav"
+    # "32:48000:32bit_48000.wav"
+    # "32:88000:32bit_88000.wav"
+    # "32:96000:32bit_96000.wav"
+    # "32:192000:32bit_192000.wav"
+)
+# ------------------------------------------
+
+
+
+# Compiler flags (mirrored from Makefile)
+CFLAGS="-std=gnu17 -D_POSIX_C_SOURCE=202405L \
+    -Wall \
+    -Wextra \
+    -Wno-maybe-uninitialized \
+    -Wno-unused-but-set-variable \
+    -O3 \
+    -march=native \
+    -mtune=native \
+    -flto=auto \
+    -flto-partition=one \
+    -fno-fat-lto-objects \
+    -fipa-pta \
+    -fivopts \
+    -fdevirtualize-at-ltrans \
+    -ftree-loop-distribution \
+    -frename-registers \
+    -fallow-store-data-races \
+    -fomit-frame-pointer \
+    -fno-stack-protector \
+    -no-pie \
+    -fno-PIE \
+    -fno-plt \
+    -ffunction-sections \
+    -fdata-sections \
+    -I./tmp/alsa-lib-1.2.14/src/pcm \
+    -I./tmp/alsa-lib-1.2.14/include"
+
+LDFLAGS_PROFILE="-no-pie \
+    -L./lib \
+    -Wl,-rpath=./lib \
+    -flto=auto \
+    -flto-partition=one \
+    -Wl,-O3 \
+    -Wl,--emit-relocs \
+    -Wl,--as-needed \
+    -Wl,--gc-sections \
+    -Wl,--hash-style=gnu"
+
+LDFLAGS_FINAL="-no-pie \
+    -L./lib \
+    -Wl,-rpath=./lib \
+    -flto=auto \
+    -flto-partition=one \
+    -Wl,-O3 \
+    -Wl,--emit-relocs \
+    -Wl,--as-needed \
+    -Wl,--gc-sections \
+    -Wl,--hash-style=gnu"
+
+LIBS="-Wl,-Bstatic -lgcov -lasound -Wl,-Bdynamic"
+
+# Create necessary directories
+mkdir -p "$BIN_DIR" "$PROFILE_DIR"
+pkill -9 qua-signals
+echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
+
+echo ""
+echo "--- Starting GCC PGO Build ---"
+echo "    PREFIX   :  $PGO_SUFFIX" 
+echo ""
+
+# Process targets from the explicit array
+for TARGET in "${TARGETS[@]}"; do
+    # Split the target string: bitdepth:samplerate:audiofile
+    IFS=':' read -r BITDEPTH SAMPLERATE AUDIO_FILE <<< "$TARGET"
+    
+    NAME="qua-player-${BITDEPTH}-${SAMPLERATE}"
+    AUDIO_PATH="$AUDIO_DIR/$AUDIO_FILE"
+    INST_BIN="$BIN_DIR/${NAME}.inst"
+    FINAL_BIN="$BIN_DIR/${NAME}$PGO_SUFFIX"
+    PROFILE_SUBDIR="$PROFILE_DIR/$NAME"
+    
+    echo "Processing **${NAME}**..."
+    
+    # Check if audio file exists
+    if [[ ! -f "$AUDIO_PATH" ]]; then
+        echo "  > Warning: Audio file $AUDIO_PATH not found. Skipping."
+        echo "---"
+        continue
+    fi
+    
+    # Cleanup any residual files from previous runs
+    rm -rf "$PROFILE_SUBDIR" # Only remove the specific subdirectory
+    rm -f "$INST_BIN"
+    mkdir -p "$PROFILE_SUBDIR"
+    
+    # 1. Instrumentation Build
+    echo "  > 1. Building instrumented version (Output: $INST_BIN)"
+    gcc $CFLAGS -fprofile-generate="$PROFILE_SUBDIR" \
+    	-DPROFILING \
+        -DTARGET_BITDEPTH=$BITDEPTH -DTARGET_SAMPLE_RATE=$SAMPLERATE \
+        -o "$INST_BIN" src/qua_player.c $LDFLAGS_PROFILE $LIBS
+    
+    if [[ $? -ne 0 ]]; then
+        echo "  > Error: Instrumentation build failed."
+        echo "---"
+        continue
+    fi
+    
+    # 2. Stability Delay for Hardware
+    echo "  > Waiting 1 second for hardware stability before running profile..."
+    sleep 1
+    
+    # 3. Profiling Run
+    echo "  > 2. Profiling with $AUDIO_FILE"
+    # The instrumented binary writes .gcda files into the directory specified by -fprofile-generate
+    $LAUNCHER 4 "$INST_BIN" "$AUDIO_PATH" || true
+    
+    # Check if profile data was generated
+    # We check if the specific subdirectory now contains files
+    if [[ ! -d "$PROFILE_SUBDIR" ]] || [[ -z "$(ls -A "$PROFILE_SUBDIR")" ]]; then
+        echo "  > Warning: Profile data not generated in $PROFILE_SUBDIR. Skipping optimization."
+        rm -f "$INST_BIN"
+        echo "---"
+        continue
+    fi
+    
+    # 4. PGO Optimized Build
+    echo "  > 3. Building PGO-optimized version -> $FINAL_BIN"
+    # Capturing error output to help diagnose failure
+    BUILD_OUTPUT=$(gcc $CFLAGS -fprofile-use="$PROFILE_SUBDIR" -fprofile-correction \
+        -DTARGET_BITDEPTH=$BITDEPTH -DTARGET_SAMPLE_RATE=$SAMPLERATE \
+        -o "$FINAL_BIN" src/qua_player.c $LDFLAGS_FINAL $LIBS 2>&1)
+    BUILD_STATUS=$?
+    
+    if [[ $BUILD_STATUS -ne 0 ]]; then
+        echo "  > FATAL Error: PGO optimization build failed (Exit Code: $BUILD_STATUS)."
+        echo "  > --- GCC Error Output ---"
+        echo "$BUILD_OUTPUT"
+        echo "  > ------------------------"
+        # rm -f "$INST_BIN"
+        # Remove the profile directory as the data might be suspect
+        # rm -rf "$PROFILE_SUBDIR" 
+        echo "---"
+        continue
+    fi
+    
+    # 5. Cleanup
+    # rm -f "$INST_BIN"
+    echo "  > Cleanup complete. Optimized binary is $FINAL_BIN"
+    echo "---"
+    
+    # 6. Installation
+    if [[ -f "$FINAL_BIN" ]]; then
+        INSTALL_NAME=$(basename "$FINAL_BIN")
+        echo "  > 6. Installing $INSTALL_NAME to $INSTALL_DIR (requires sudo)..."
+        sudo install -m 755 "$FINAL_BIN" "$INSTALL_DIR/$INSTALL_NAME"
+        echo "  > Installation complete: $INSTALL_DIR/$INSTALL_NAME"
+    fi
+    echo "---"
+
+done
+
+echo 2 | sudo tee /proc/sys/kernel/randomize_va_space
+
+echo "--- All GCC PGO processing finished. ---"
+echo "✅ Complete! Optimized binaries"
+ls -lh "$BIN_DIR"/*"$PGO_SUFFIX" 2>/dev/null || echo "No optimized binaries found."

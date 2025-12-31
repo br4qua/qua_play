@@ -1,0 +1,415 @@
+#define _GNU_SOURCE
+#include <signal.h>
+#include <sys/types.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <alsa/asoundlib.h>   // Alsa
+#include <sys/mman.h>         // For madvice
+#include "config_consts.h" // configurations
+#include "custom_memcpy.h" // Custom implementation of memcopy
+#include "custom_syscall.h" // For Custom syscalls
+#include "qua_player_pgo.h" 
+#include "debug.h"
+#include "wav_header.h" // To parse Wav
+#define memcpy_custom avx512_stream_copy_zero
+
+extern void __gcov_reset(void);
+
+static int setup_alsa(snd_pcm_t **handle, const char *device)
+{
+  snd_pcm_hw_params_t *hw_params;
+  snd_pcm_hw_params_alloca(&hw_params);
+
+  int err;
+  // 1. Open audio device
+  err = snd_pcm_open(handle, device, SND_PCM_STREAM_PLAYBACK, 0);
+
+  // 2. Allocate hardware parameters
+
+  // err = snd_pcm_hw_params_malloc(&hw_params);
+#ifdef DEBUG
+  if (err < 0)
+  {
+    fprintf(stderr, "Cannot allocate hardware parameters: %s\n",
+            snd_strerror(err));
+    return -1;
+  }
+#endif
+
+  // 3. Initialize hardware parameters
+  err = snd_pcm_hw_params_any(*handle, hw_params);
+#ifdef DEBUG
+  if (err < 0)
+  {
+    fprintf(stderr, "Cannot initialize hardware parameters: %s\n",
+            snd_strerror(err));
+
+    return -1;
+  }
+#endif
+
+  // 4. Set mmap access mode
+  err = snd_pcm_hw_params_set_access(
+      *handle, hw_params, SND_PCM_ACCESS_MMAP_INTERLEAVED);
+#ifdef DEBUG
+  if (err < 0)
+  {
+    fprintf(stderr, "Cannot set interleaved mmap access type: %s\n",
+            snd_strerror(err));
+
+    return -1;
+  }
+#endif
+
+  // 5. Set sample format
+  err = snd_pcm_hw_params_set_format(*handle, hw_params,
+                                     PCM_FORMAT);
+
+#ifdef DEBUG
+  if (err < 0)
+  {
+    fprintf(stderr, "Cannot set sample format: %s\n", snd_strerror(err));
+
+    return -1;
+  }
+#endif
+
+  // 6. Set sample rate
+  err = snd_pcm_hw_params_set_rate(*handle, hw_params, TARGET_SAMPLE_RATE, 0);
+#ifdef DEBUG
+  if (err < 0)
+  {
+    fprintf(stderr, "Cannot set sample rate: %s\n", snd_strerror(err));
+
+    return -1;
+  }
+#endif
+
+  // 7. Set channel count
+  err = snd_pcm_hw_params_set_channels(*handle, hw_params, SAMPLES_PER_FRAME);
+#ifdef DEBUG
+  if (err < 0)
+  {
+    fprintf(stderr, "Cannot set channel count: %s\n", snd_strerror(err));
+
+    return -1;
+  }
+#endif
+
+  // 8. Set buffer size (EXACT)
+  // NOTE: This call will fail if the exact frame count is not supported by hardware.
+  err = snd_pcm_hw_params_set_buffer_size(*handle, hw_params,
+                                          FRAMES_PER_BUFFER);
+#ifdef DEBUG
+  if (err < 0)
+  {
+    fprintf(stderr, "Cannot set EXACT buffer size: %s\n", snd_strerror(err));
+    fprintf(stderr, "Requested size: %lu frames. Hardware may require 'near' mode.\n", (long unsigned int)FRAMES_PER_BUFFER);
+    return -1;
+  }
+#endif
+
+  // 9. Set period size (EXACT)
+  err = snd_pcm_hw_params_set_period_size(*handle, hw_params,
+                                          FRAMES_PER_PERIOD, 0);
+#ifdef DEBUG
+  if (err < 0)
+  {
+    fprintf(stderr, "Cannot set EXACT period size: %s\n", snd_strerror(err));
+    fprintf(stderr, "Requested size: %lu frames. Hardware may require 'near' mode.\n", (long unsigned int)FRAMES_PER_PERIOD);
+    return -1;
+  }
+#endif
+
+  // 10. Apply hardware parameters
+  err = snd_pcm_hw_params(*handle, hw_params);
+#ifdef DEBUG
+  if (err < 0)
+  {
+    fprintf(stderr, "Cannot set hardware parameters: %s\n", snd_strerror(err));
+
+    return -1;
+  }
+#endif
+
+  // 11. Clean up hardware parameters structure (after successful application)
+  // snd_pcm_hw_params_free(hw_params);
+
+  // 12. Prepare the PCM device
+  return snd_pcm_prepare(*handle);
+}
+
+int main(int argc, char *argv[])
+{
+  // Lock memory for real-time performance
+    WavHeader header = {0};
+  int err = mlockall(MCL_CURRENT | MCL_FUTURE);
+#ifdef DEBUG
+  if (unlikely(err  == -1))
+  {
+    perror("mlockall failed");
+  }
+#endif
+
+  if (unlikely(argc < 2))
+  {
+    printf("Usage: %s <wav_file> [device_name] \n Example: qua_player test.wav "
+           "hw:0,0\n",
+           argv[0]);
+    return -1;
+  }
+
+  const char *filename = argv[1];
+  const char *device_name = "hw:0,0";
+
+  // --- HUGE PAGE ALSA DEVICE CONFIGURATION ---
+  if (argc == 2)
+  {
+    device_name = "hw:0,0";
+    printf("No device specified. Using default: %s (Check ALSA config for Huge Pages)\n", device_name);
+  }
+  else
+  {
+    device_name = argv[2];
+  }
+
+  DEBUG_PRINT("ALSA Optimized Mmap Player - Huge Page Attempt\n");
+  DEBUG_PRINT("File: %s, Device: %s\n", filename, device_name);
+
+  // WavHeader header;
+  const int fd = open(filename, O_RDONLY);
+#ifdef DEBUG
+  if (fd < 0)
+  {
+    perror("Error opening WAV file");
+    return -1;
+  }
+#endif
+  off_t data_offset = read_wav_header(fd, &header);
+// Previously had off_t type, which was used to check
+// TODO : move debug into read_wav_header itself
+// #ifdef DEBUG
+//   if (unlikely(data_offset < 0))
+//   {
+//     close(fd);
+//     return -1;
+//   }
+// #endif
+
+  snd_pcm_t *pcm_handle_writable = NULL;
+  err = setup_alsa(&pcm_handle_writable, device_name);
+
+#ifdef DEBUG
+  if (unlikely(err < 0))
+  {
+    close(fd);
+    return -1;
+  }
+#endif
+  snd_pcm_t *const pcm_handle = pcm_handle_writable;
+  DEBUG_PRINT("Attempting fixed 1 GB Huge Page allocation for %zu bytes\n",
+              HUGE_PAGE_SIZE);
+
+  // --- HUGE PAGE ALLOCATION FOR SOURCE BUFFER
+  sample_t *audio_data_writable = (sample_t *)mmap(NULL,
+                                                   HUGE_PAGE_SIZE, // 1GB
+                                                   PROT_READ | PROT_WRITE,
+                                                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_POPULATE | MAP_HUGE_1GB,
+                                                   -1,
+                                                   0);
+#ifdef DEBUG
+  if (unlikely(audio_data_writable == MAP_FAILED))
+  {
+    perror("FATAL: Failed to allocate Huge Pages for audio data (mmap MAP_HUGETLB)");
+    fprintf(stderr, "Huge Page allocation is mandatory. Check system configuration (e.g., /proc/sys/vm/nr_hugepages).\n");
+    // Cleanup and exit immediately as Huge Pages are required.
+    snd_pcm_close(pcm_handle);
+    close(fd);
+    return -1;
+  }
+#endif
+
+#ifdef DEBUG
+  // Read audio data (omitted for brevity, assume it's here)
+  if (unlikely(lseek(fd, data_offset, SEEK_SET) != data_offset))
+  {
+    fprintf(stderr, "Failed to seek to audio data\n");
+    munmap(audio_data, huge_page_aligned_size); // Use munmap for cleanup
+    close(fd);
+    return -1;
+  }
+#endif
+
+  ssize_t total_read = 0;
+  // Read as much as possible, to reduce "hotness" of read comment for LLVM-BOLT profiling sake
+  while (total_read < header.data_bytes)
+  {
+    ssize_t bytes_read = read(fd, (char *)audio_data_writable + total_read,
+                              header.data_bytes - total_read);
+#ifdef DEBUG
+    if (unlikely(bytes_read <= 0))
+    {
+      fprintf(stderr, "Failed to read audio data\n");
+      munmap(audio_data, huge_page_aligned_size); // Use munmap for cleanup
+      snd_pcm_close(pcm_handle);
+      close(fd);
+      return -1;
+    }
+#endif
+    total_read += bytes_read;
+  }
+  close(fd);
+  memset((char *)audio_data_writable + header.data_bytes, 0, HUGE_PAGE_SIZE - header.data_bytes);
+  err = mprotect((void *)audio_data_writable, HUGE_PAGE_SIZE, PROT_READ);
+  const sample_t *const audio_data = (const sample_t *)__builtin_assume_aligned(
+      audio_data_writable,
+      HUGE_PAGE_SIZE // 1GB alignment guaranteed
+  );
+#ifdef DEBUG
+  if (unlikely(err == -1))
+  {
+    perror("FATAL: mprotect failed to set PROT_READ");
+    // Decide if failure is tolerable or requires cleanup/exit
+  }
+#endif
+
+  // PHASE 1: Setup source pointers directly
+  const size_t total_frames = header.data_bytes / (2 * sizeof(sample_t));
+
+  const sample_t *current_src = audio_data;
+  // Padds some zero to wait for drain
+  const sample_t *const end_src_boundary = audio_data + (total_frames * SAMPLES_PER_FRAME) +
+                                           (((FRAMES_PER_PERIOD * SAMPLES_PER_FRAME) - ((total_frames * SAMPLES_PER_FRAME) % (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME))) % (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME)) +
+                                           (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME);
+  DEBUG_PRINT("Phase 1: Set up source pointers - start=%p, end=%p\n",
+              current_src, end_src_boundary);
+
+  // --- 1. Attempt to get buffer area for the full two periods ---
+  const snd_pcm_channel_area_t *areas;
+  snd_pcm_uframes_t commit_frames = 2 * FRAMES_PER_PERIOD; // Request 2 periods
+  snd_pcm_uframes_t commit_offset;
+  err = snd_pcm_mmap_begin(pcm_handle, &areas,
+                           &commit_offset,
+                           &commit_frames);
+
+// --- 2. Check for Error First ---
+#ifdef DEBUG
+  if (unlikely(err < 0 || commit_frames < (2 * FRAMES_PER_PERIOD)))
+  {
+    // Fail if we can't get the full two periods
+    DEBUG_PRINT("Failed to get full pre-fill buffer area. Requested: %u frames, Got: %u frames. Error: %d\n",
+                (unsigned int)(2 * FRAMES_PER_PERIOD), (unsigned int)commit_frames, err);
+    return -1;
+  }
+#endif
+
+  // --- 3. Main Success Logic (Purely Sequential) ---
+
+  // Direct Initialization (as discussed, assuming guaranteed NULL)
+  // const char *mmap_audio_base = (char *)areas[0].addr + (areas[0].first / CHAR_BIT);
+  const char *mmap_audio_base = (char *)__builtin_assume_aligned(
+      (char *)areas[0].addr + (areas[0].first / CHAR_BIT),
+      ALIGN_4K // Page-aligned
+  );
+  // assert(((uintptr_t)mmap_audio_base & 4095) == 0 && "mmap_audio_base must be 4KB aligned");
+  DEBUG_PRINT("Set mmap base address: %p\n", mmap_audio_base);
+
+  // madvise((void *)audio_data, HUGE_PAGE_SIZE, MADV_SEQUENTIAL);
+  memcpy_custom((sample_t *)__builtin_assume_aligned(mmap_audio_base, ALIGN_4K),
+                       (const sample_t *)__builtin_assume_aligned(current_src, ALIGN_4K));
+
+  // --- FILL PERIOD 2 ---
+  memcpy_custom((sample_t *)__builtin_assume_aligned((mmap_audio_base + BYTES_PER_PERIOD), ALIGN_4K),
+                       (const sample_t *)__builtin_assume_aligned(current_src + FRAMES_PER_PERIOD * SAMPLES_PER_FRAME, ALIGN_4K));
+
+  current_src += FRAMES_PER_PERIOD * SAMPLES_PER_FRAME * 2;
+  _mm_sfence();
+
+  // Update pointer and notify
+  snd_pcm_t *const pcm_handle_cached = pcm_handle;
+  volatile snd_pcm_uframes_t *appl_ptr = snd_pcm_appl_ptr(pcm_handle_cached);
+  *appl_ptr += (FRAMES_PER_PERIOD * 2); // Advance by two periods
+  snd_pcm_notify_hw(pcm_handle);
+
+  DEBUG_PRINT("Pre-filled two periods sequentially.\n");
+  DEBUG_PRINT("Starting snd_pcm_start");
+
+  err = snd_pcm_start(pcm_handle);
+  DEBUG_CHECK(err < 0, "Failed to start playback: %s\n", snd_strerror(err));
+
+
+  // Main Buffer Filling Loop
+  // const char *mmap_audio_base_cached = mmap_audio_base;
+
+  // TEST TODO
+  const char *const restrict mmap_audio_base_cached = (const char *const)__builtin_assume_aligned(mmap_audio_base, ALIGN_4K);
+  const sample_t *src = (const sample_t *)__builtin_assume_aligned(
+      current_src,
+      ALIGN_4K);
+  const sample_t *const end_src = end_src_boundary;
+  sample_t iterations = (end_src - src) / (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME);
+
+  // Declarations required for inlined poll() synchronization
+  struct pollfd pfd[2];
+  const int npfds = 1;
+  // const int npfds = snd_pcm_poll_descriptors_count(pcm_handle_cached);
+  snd_pcm_poll_descriptors(pcm_handle_cached, pfd, npfds);
+  PGO_PROFILING_RESET();
+  do
+  {
+
+    my_poll(pfd, npfds, -1);
+    memcpy_custom((sample_t *)__builtin_assume_aligned(mmap_audio_base_cached, ALIGN_4K),
+                         (const sample_t *)__builtin_assume_aligned(src, ALIGN_4K));
+    *appl_ptr += FRAMES_PER_PERIOD;
+    snd_pcm_notify_hw(pcm_handle_cached);
+    
+    my_poll(pfd, npfds, -1);
+    memcpy_custom((sample_t *)__builtin_assume_aligned((mmap_audio_base_cached + BYTES_PER_PERIOD), ALIGN_4K),
+                         (const sample_t *)__builtin_assume_aligned(src + (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME), ALIGN_4K));
+    *appl_ptr += FRAMES_PER_PERIOD;
+    snd_pcm_notify_hw(pcm_handle_cached);
+   
+    src += (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME * 2);
+    iterations -= 2;
+
+  } while (likely(iterations > 0));
+  PGO_PROFILING_FLUSH();	
+  
+  snd_pcm_drain(pcm_handle_cached);
+  snd_pcm_close(pcm_handle_cached);
+  DEBUG_PRINT("\nPlayback completed!\n");
+  printf("DEBUG: About to call popen\n");
+  fflush(stdout);
+  FILE *fp = popen("pidof qua-signals", "r");
+  printf("DEBUG: popen returned %p\n", fp);
+  fflush(stdout);
+  
+  if (fp) {
+      pid_t pid;
+      printf("DEBUG: About to fscanf\n");
+      fflush(stdout);
+      if (fscanf(fp, "%d", &pid) == 1) {
+          printf("DEBUG: Found PID %d, sending signal\n", pid);
+          fflush(stdout);
+          kill(pid, SIGUSR1);
+          printf("DEBUG: Signal sent\n");
+          fflush(stdout);
+      } else {
+          printf("DEBUG: No PID found\n");
+          fflush(stdout);
+      }
+      printf("DEBUG: About to pclose\n");
+      fflush(stdout);
+      pclose(fp);
+      printf("DEBUG: pclose done\n");
+      fflush(stdout);
+  }
+  printf("DEBUG: Exiting normally\n");
+  fflush(stdout);
+ 
+  // --- HUGE PAGE CLEANUP ---
+  // munmap(audio_data, huge_page_aligned_size);
+  return 0;
+}

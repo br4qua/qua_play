@@ -1,0 +1,5 @@
+pcm_symbols.lo: pcm_symbols.c /usr/include/stdc-predef.h \
+ ../../include/config.h pcm_symbols_list.c
+/usr/include/stdc-predef.h:
+../../include/config.h:
+pcm_symbols_list.c:

@@ -1,0 +1,156 @@
+#!/bin/sh
+# ALSA Library LLVM Bitcode Build Script (Clang/LLVM, Static Library)
+# Version: 1.2.14
+# Goal: Produce libasound.a archive containing LLVM bitcode using aggressive LTO.
+# FIX: Guarantees LTO flags are used via CFLAGS, AM_CFLAGS, and patched libtool.
+set -e # Exit on any error
+
+# Source external URLs
+ALSA_URL="https://www.alsa-project.org/files/pub/lib/alsa-lib-1.2.14.tar.bz2"
+
+# Configuration
+ALSA_VERSION="1.2.14"
+WORK_DIR="$(pwd)/tmp"
+BUILD_DIR="${WORK_DIR}/alsa-lib-${ALSA_VERSION}"
+LIB_DIR="$(pwd)/lib"
+
+echo "=== ALSA Library LLVM Bitcode Build Script (Clang/LLVM, Static) ==="
+echo "Version: ${ALSA_VERSION}"
+echo "Build directory: ${BUILD_DIR}"
+echo "Output directory: ${LIB_DIR}"
+echo
+
+# Create lib directory
+mkdir -p "$LIB_DIR"
+
+# =======================================================================
+# Step 1: Download and extract ALSA library
+# =======================================================================
+echo "Step 1: Checking for existing ALSA library source..."
+if [ -d "$BUILD_DIR" ];
+then
+    echo "Source directory '$BUILD_DIR' found. Reusing source."
+    cd "${BUILD_DIR}"
+else
+    echo "Source directory not found. Downloading and extracting ALSA library..."
+    mkdir -p "${WORK_DIR}"
+    cd "${WORK_DIR}"
+    if [ ! -f "alsa-lib-${ALSA_VERSION}.tar.bz2" ]; then
+        wget "${ALSA_URL}"
+    fi
+    tar -xjf "alsa-lib-${ALSA_VERSION}.tar.bz2"
+    cd "${BUILD_DIR}"
+fi
+
+# =======================================================================
+# Step 2: Patch libtool to prevent LTO disabling
+# =======================================================================
+echo "Step 2: Patching libtool to preserve LTO flags..."
+# Comment out any lines that add -fno-lto (CRITICAL fix for libtool)
+sed -i 's/.*-fno-lto.*/# &/' m4/libtool.m4
+sed -i 's/.*-fno-lto.*/# &/' ltmain.sh
+
+echo "Patched files - -fno-lto lines have been commented out"
+
+# =======================================================================
+# Step 3: Regenerate build system and Clean
+# =======================================================================
+echo "Step 3: Regenerating build system with patched libtool..."
+autoreconf -fiv
+
+echo "Step 3.1: Cleaning previous builds..."
+make distclean 2>/dev/null ||
+true
+
+# =======================================================================
+# Step 4: Configure and Build with GUARANTEED Aggressive LTO (The Fix)
+# =======================================================================
+echo "Step 4: Configuring with Clang/LLVM and GUARANTEED aggressive LTO..."
+
+# 4.1 Set Toolchain and Archiver
+export CC=clang
+export CXX=clang++
+# FIX: Use standard system 'ar' for better libtool compatibility. Clang handles LTO.
+export AR=ar
+export RANLIB=ranlib
+export NM=llvm-nm
+
+# 4.2 Flags for ./configure (Minimal LTO to pass checks)
+# Set CFLAGS and AM_CFLAGS with 'thin' LTO for the configure step
+export CFLAGS="-march=native -mtune=native -O3 -flto=thin"
+export AM_CFLAGS="$CFLAGS"
+export LDFLAGS="-flto=thin"
+
+./configure \
+    --disable-shared --enable-static \
+    --disable-mixer --disable-rawmidi --disable-hwdep --disable-seq \
+    --disable-ucm --disable-topology \
+    --with-versioned \
+    --disable-resmgr \
+    --disable-aload \
+    --with-pcm-plugins="" \
+    --with-ctl-plugins="" \
+    --with-debug=no \
+    --disable-thread-safety \
+    --with-libdl=no \
+    --with-pthread=no \
+    --with-librt=no \
+    --with-wordexp=no \
+    --disable-python
+
+# 4.3 Flags for make (Aggressive LTO for final build)
+# Redefine CFLAGS and the CRUCIAL AM_CFLAGS aggressively right before make.
+export CFLAGS="-march=native -mtune=native -O3 \
+    -flto=full \
+    -fwhole-program-vtables \
+    -fno-align-jumps \
+    -funroll-loops \
+    -ftree-vectorize \
+    -fno-math-errno \
+    -fno-signed-zeros \
+    -fassociative-math \
+    -freciprocal-math \
+    -ffast-math \
+    -fomit-frame-pointer \
+    -ffunction-sections \
+    -fdata-sections \
+    -fmerge-all-constants \
+    -fno-plt"
+
+export AM_CFLAGS="$CFLAGS" # CRITICAL: Ensures Automake uses -flto=full
+    
+export LDFLAGS="-flto=full \
+    -Wl,--gc-sections \
+    -Wl,--strip-all \
+    -Wl,--icf=all \
+    -Wl,-O3 \
+    -Wl,--hash-style=gnu \
+    -Wl,--build-id=none \
+    -Wl,--sort-section=alignment"
+
+# =======================================================================
+# Step 5: Build and Install
+# =======================================================================
+echo "Step 5: Building ALSA static library with LLVM bitcode..."
+make -j$(nproc)
+
+# Step 6: Install the optimized library
+echo "Step 6: Installing LLVM bitcode static library..."
+cp src/.libs/libasound.a "$LIB_DIR/"
+
+# =======================================================================
+# Step 7: Verify and Finish
+# =======================================================================
+echo "Step 7: Verifying static library..."
+ls -lh "$LIB_DIR"/libasound.a
+file "$LIB_DIR"/libasound.a
+
+# Check if it contains LLVM IR
+if command -v llvm-readobj >/dev/null && llvm-readobj -h "$LIB_DIR"/libasound.a 2>/dev/null | grep -q "bitcode"; then
+    echo "Verification: Archive appears to contain LLVM bitcode (IR)"
+fi
+
+echo
+echo "=== Build Complete ==="
+echo "LLVM Bitcode ALSA static library installed to: $LIB_DIR/libasound.a"
+echo

@@ -1,9 +1,0 @@
-[Unit]
-Description=Qua MPRIS D-Bus adapter
-
-[Service]
-Type=simple
-ExecStart=/home/free2/code/scripts-current/qua-mpris
-
-[Install]
-WantedBy=default.target

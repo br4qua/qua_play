@@ -1,4 +1,4 @@
-CC = gcc
+CC = musl-gcc
 CFLAGS = -Os -march=native -mtune=native -flto -Wall
 LDFLAGS = -flto -Wl,-O1 -Wl,--as-needed -Wl,--strip-all
 TARGET = qua-signals

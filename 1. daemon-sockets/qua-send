@@ -1,0 +1,66 @@
+#!/bin/sh
+
+show_help() {
+    cat <<'EOF'
+qua-send - control qua-player daemon
+
+Usage: qua-send <action> [files...]
+
+Actions:
+  play [file]     Play file, or resume last played
+  next            Play next track in directory
+  prev            Play previous track in directory
+  stop            Stop playback
+  show            Show current track info
+  history         Pick from history with fzf
+
+Examples:
+  qua-send play song.flac
+  qua-send play *.wv
+  qua-send next
+  qua-send stop
+  qua-send history
+EOF
+}
+
+if [ -z "$1" ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    show_help
+    exit 0
+fi
+
+ACTION="$1"
+shift
+
+case "$ACTION" in
+    next) ACTION="play-next" ;;
+    prev) ACTION="play-prev" ;;
+esac
+
+if [ "$ACTION" = "history" ]; then
+    HISTORY_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/qua-player/history"
+    if [ ! -f "$HISTORY_FILE" ]; then
+        echo "No history file found" >&2
+        exit 1
+    fi
+    path=$(tac "$HISTORY_FILE" | awk '{ts=$1" "$2; $1=$2=""; p=$0; sub(/^ +/,"",p); if(seen[p]++)next; bn=p; gsub(/.*\//,"",bn); print ts"\t"p"\t"bn}' | \
+           fzf --with-nth=1,3 --delimiter='\t' \
+               --height=10 \
+               --layout=reverse \
+               --border=sharp \
+               --info=inline \
+               --no-bold | cut -f2)
+    if [ -n "$path" ]; then
+        printf '%s\0%s\0' "play" "$path" | socat - UNIX-CONNECT:/tmp/qua-socket.sock
+    fi
+elif [ "$ACTION" = "show" ]; then
+    path=$(printf '%s\0' "$ACTION" | socat - UNIX-CONNECT:/tmp/qua-socket.sock)
+    echo "$path"
+    qua-info "$path"
+else
+    {
+        printf '%s\0' "$ACTION"
+        for f in "$@"; do
+            printf '%s\0' "$(realpath "$f")"
+        done
+    } | socat - UNIX-CONNECT:/tmp/qua-socket.sock
+fi

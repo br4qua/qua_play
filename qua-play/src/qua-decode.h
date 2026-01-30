@@ -2,6 +2,7 @@
 #define QUA_DECODE_H
 
 #include <limits.h>
+#include <linux/limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 

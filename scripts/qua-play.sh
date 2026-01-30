@@ -1,6 +1,6 @@
 #!/bin/sh
 
-NUKE_SUFFIX="" # PGO player pgo suffix or .pgo8.bolt4
+NUKE_SUFFIX=".pgo8" # PGO player pgo suffix or .pgo8.bolt4
 DEVICE="hw:0,0"			# Playback device, for valid devices see qua-valid-device
 CORE="4"				# Which core player to be pinned on.
 BIT_DEPTH_VALID="16 32" # List of valid Bit-depths your hardware supports.

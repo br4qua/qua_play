@@ -20,30 +20,7 @@
 
 extern char **environ;
 
-
-void update_mpris(const char *filepath) {
-  // char *file_dup = strdup(filepath);
-  // char *base = basename(file_dup);
-  // char *dir_dup = strdup(filepath);
-  // char *folder = basename(dirname(dir_dup));
-  //
-  // if (vfork() == 0) {
-  //     char dest[] = "org.mpris.MediaPlayer2.qua";
-  //     char path[] = "/org/mpris/MediaPlayer2";
-  //     char method[] = "org.mpris.MediaPlayer2.Player.UpdateMetadata";
-  //     execlp("dbus-send", "dbus-send", "--session", "--type=method_call",
-  //            "--dest=" "org.mpris.MediaPlayer2.qua",
-  //            "/org/mpris/MediaPlayer2",
-  //            "org.mpris.MediaPlayer2.Player.UpdateMetadata",
-  //            base, folder, NULL);
-  //     _exit(1);
-  // }
-  //
-  // free(file_dup);
-  // free(dir_dup);
-}
-
-
+// TODO ADD A FAST post processing step for 24bit->32bit conversion
 void *cleanup_services(void *arg) {
   pid_t pid;
   int status;
@@ -113,14 +90,19 @@ static void play_audio(const char *cache_file) {
     pclose(pwh);
   }
   
-  // Fallback to generic qua-player
-  if (p_full[0] == '\0') {
-    pwh = popen("which qua-player 2>/dev/null", "r");
-    if (pwh) {
-      if (fgets(p_full, PATH_MAX, pwh))
-        p_full[strcspn(p_full, "\n")] = 0;
-      pclose(pwh);
-    }
+ if (p_full[0] == '\0') {
+      char cmd[256]; // Buffer to hold the formatted command
+      
+      // Construct the command string using s_bd and s_sr
+      snprintf(cmd, sizeof(cmd), "which qua-player-%s-%s 2>/dev/null", s_bd, s_sr);
+  
+      pwh = popen(cmd, "r");
+      if (pwh) {
+          if (fgets(p_full, PATH_MAX, pwh)) {
+              p_full[strcspn(p_full, "\n")] = 0;
+          }
+          pclose(pwh);
+      }
   }
   
   // Execute the chosen player with vfork
@@ -256,18 +238,20 @@ int main(int argc, char *argv[]) {
     if (needs_post_process) {
       // Post-process: mix channels and resample
       char post_processed[PATH_MAX];
-      snprintf(post_processed, sizeof(post_processed), "%s", cache_file);
+      convert_24bit_to_32bit_wav_fast(cache_file);
       
-      if (qua_post_process(cache_file, target_bd, target_sr, detected_ch) != 0) {
-        fprintf(stderr, "Error: Post-processing failed\n");
-        return 1;
-      }
+      // snprintf(post_processed, sizeof(post_processed), "%s", cache_file);
       
-      // Replace cache file with post-processed version
-      if (rename(post_processed, cache_file) != 0) {
-        fprintf(stderr, "Error: Failed to replace cache file\n");
-        return 1;
-      }
+      // if (qua_post_process(cache_file, target_bd, target_sr, detected_ch) != 0) {
+      //   fprintf(stderr, "Error: Post-processing failed\n");
+      //   return 1;
+      // }
+      
+      // // Replace cache file with post-processed version
+      // if (rename(post_processed, cache_file) != 0) {
+      //   fprintf(stderr, "Error: Failed to replace cache file\n");
+      //   return 1;
+      // }
     }
   }
   

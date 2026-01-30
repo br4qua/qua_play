@@ -1,0 +1,32 @@
+# AUDIO TODO
+
+directly to music place (and visit dir) in shell
+
+printf "$PWD/%s\n" *.flac
+sop -> send to correct location
+
+
+
+qua-player 
+check why song cannot autoadvancce on very short songs
+
+qua-info 
+write test
+
+add wav header reader
+investigate how to export album info / song info
+investigate exports to other program (to internalize, or to link .so)
+
+
+
+qua-play
+did not handle post processing correct (check 32khz, 6ch)
+
+post processing
+add auto-no-clipping?
+
+
+MPRIS
+add song-name-on mpris, from qua-play -> qua-mpris-c
+
+

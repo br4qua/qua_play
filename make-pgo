@@ -6,19 +6,24 @@ BIN_DIR="./bin"
 PROFILE_DIR="./pgo_data"
 INSTALL_DIR="/usr/local/bin"
 
-PGO_SUFFIX=".pgo8" 
+PGO_SUFFIX=".pgo9" 
 LAUNCHER="qua-bare-launcher"
 
 TARGETS=(
     # 16-bit Targets
-    # "16:44100:16bit_44100.wav"
+    "16:44100:16bit_44100.wav"
     "16:48000:16bit_48000.wav"
+    # "16:88200:16bit_88200.wav"
+    # "16:96000:16bit_96000.wav"
+    # "16:174000:16bit_17400.wav"
+    # "16:192000:16bit_192000.wav"
     # 32-bit Targets
-    # "32:44100:32bit_44100.wav"
-    # "32:48000:32bit_48000.wav"
-    # "32:88000:32bit_88000.wav"
-    # "32:96000:32bit_96000.wav"
-    # "32:192000:32bit_192000.wav"
+    "32:44100:32bit_44100.wav"
+    "32:48000:32bit_48000.wav"
+    "32:88200:32bit_88200.wav"
+    "32:96000:32bit_96000.wav"
+    "32:174000:32bit_174000.wav"
+    "32:192000:32bit_192000.wav"
 )
 # ------------------------------------------
 

@@ -16,12 +16,14 @@
 #include <dirent.h>
 #include <libgen.h>
 #include <sys/wait.h>
+#include <poll.h>
 
 #define QUA_CONVERT_CMD "qua-convert"
 #define QUA_LAUNCHER_CMD "qua-bare-launcher"
 #define SOCKET_PATH "/tmp/qua-socket.sock"
 #define LOCK_PATH "/tmp/qua-socket-daemon.lock"
 #define BUF_SIZE 4096
+#define COALESCE_TIMEOUT_MS 5000
 
 extern char **environ;
 
@@ -346,7 +348,54 @@ static void spawn_play(const char *path) {
     log_ts("spawn_play: END");
 }
 
-static void handle_command(int client_fd) {
+// Coalesce rapid next/prev commands, returns net offset
+static int coalesce_navigation(int server_fd, int initial_offset,
+                               int first_client_fd, int *last_client_fd) {
+    int offset = initial_offset;
+    int coalesced_count = 0;
+    *last_client_fd = first_client_fd;
+
+    while (1) {
+        struct pollfd pfd = { .fd = server_fd, .events = POLLIN };
+        int ret = poll(&pfd, 1, COALESCE_TIMEOUT_MS);
+
+        if (ret <= 0) break;  // timeout or error
+
+        int new_fd = accept(server_fd, NULL, NULL);
+        if (new_fd == -1) break;
+
+        char buf[BUF_SIZE];
+        ssize_t n = read(new_fd, buf, sizeof(buf) - 1);
+        if (n <= 0) { close(new_fd); continue; }
+        buf[n] = '\0';
+
+        if (strcmp(buf, "play-next") == 0) {
+            offset++;
+            coalesced_count++;
+            dprintf(*last_client_fd, "Queued (+%d)\n", offset);
+            close(*last_client_fd);
+            *last_client_fd = new_fd;
+        } else if (strcmp(buf, "play-prev") == 0) {
+            offset--;
+            coalesced_count++;
+            dprintf(*last_client_fd, "Queued (%d)\n", offset);
+            close(*last_client_fd);
+            *last_client_fd = new_fd;
+        } else {
+            // Non-navigation command - drop during coalesce, user retries
+            close(new_fd);
+            break;
+        }
+    }
+
+    if (coalesced_count > 0) {
+        log_ts("coalesce: merged %d commands, final offset=%+d", coalesced_count, offset);
+    }
+
+    return offset;
+}
+
+static void handle_command(int server_fd, int client_fd) {
     char buf[BUF_SIZE];
     ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
     if (n <= 0) return;
@@ -377,22 +426,30 @@ static void handle_command(int client_fd) {
         } else {
             dprintf(client_fd, "Nothing playable\n");
         }
-    } else if (strcmp(action, "play-next") == 0) {
-        char next[PATH_MAX];
-        if (get_next(last_played, 1, next, sizeof(next)) == 0) {
-            spawn_play(next);
-            log_play(next);
-            snprintf(last_played, sizeof(last_played), "%s", next);
-            dprintf(client_fd, "Next: %s\n", strrchr(next, '/') ? strrchr(next, '/') + 1 : next);
+    } else if (strcmp(action, "play-next") == 0 || strcmp(action, "play-prev") == 0) {
+        int initial_offset = (strcmp(action, "play-next") == 0) ? 1 : -1;
+        int last_fd;
+        int offset = coalesce_navigation(server_fd, initial_offset, client_fd, &last_fd);
+
+        char target[PATH_MAX];
+        if (get_next(last_played, offset, target, sizeof(target)) == 0) {
+            spawn_play(target);
+            log_play(target);
+            snprintf(last_played, sizeof(last_played), "%s", target);
+            const char *basename = strrchr(target, '/');
+            basename = basename ? basename + 1 : target;
+            if (offset == 1) {
+                dprintf(last_fd, "Next: %s\n", basename);
+            } else if (offset == -1) {
+                dprintf(last_fd, "Prev: %s\n", basename);
+            } else {
+                dprintf(last_fd, "Skipped %+d: %s\n", offset, basename);
+            }
         }
-    } else if (strcmp(action, "play-prev") == 0) {
-        char prev[PATH_MAX];
-        if (get_next(last_played, -1, prev, sizeof(prev)) == 0) {
-            spawn_play(prev);
-            log_play(prev);
-            snprintf(last_played, sizeof(last_played), "%s", prev);
-            dprintf(client_fd, "Prev: %s\n", strrchr(prev, '/') ? strrchr(prev, '/') + 1 : prev);
+        if (last_fd != client_fd) {
+            close(last_fd);
         }
+        return;  // client_fd already handled or will be closed by caller
     } else if (strcmp(action, "stop") == 0) {
         kill_player();
         run_hook_async(hook_teardown, last_played);
@@ -460,7 +517,7 @@ int main(void) {
     while (1) {
         int client_fd = accept(server_fd, NULL, NULL);
         if (client_fd == -1) continue;
-        handle_command(client_fd);
+        handle_command(server_fd, client_fd);
         close(client_fd);
     }
 

@@ -23,7 +23,15 @@
 #define SOCKET_PATH "/tmp/qua-socket.sock"
 #define LOCK_PATH "/tmp/qua-socket-daemon.lock"
 #define BUF_SIZE 4096
-#define COALESCE_TIMEOUT_MS 5000
+#define COALESCE_TIMEOUT_MS 50
+
+// Conversion state for event loop
+static struct {
+    pid_t pid;
+    int fd;
+    char target[PATH_MAX];
+    int active;
+} conv_state = {0};
 
 extern char **environ;
 
@@ -293,6 +301,69 @@ static int finish_convert(pid_t pid, int fd, char *player, char *wav, size_t siz
     return 0;
 }
 
+// Forward declarations
+static void launch_player(const char *player, const char *wav);
+
+// Cancel current conversion if active
+static void cancel_conversion(void) {
+    if (!conv_state.active) return;
+
+    log_ts("EVENT: canceling conversion pid=%d target=%s", conv_state.pid, conv_state.target);
+    kill(conv_state.pid, SIGKILL);
+    waitpid(conv_state.pid, NULL, 0);
+    close(conv_state.fd);
+    conv_state.active = 0;
+    conv_state.pid = 0;
+    conv_state.fd = -1;
+    conv_state.target[0] = '\0';
+}
+
+// Start async conversion, returns 0 on success
+static int start_async_conversion(const char *path) {
+    cancel_conversion();  // Cancel any existing
+
+    pid_t pid;
+    int fd = start_convert(path, &pid);
+    if (fd < 0) return -1;
+
+    conv_state.pid = pid;
+    conv_state.fd = fd;
+    snprintf(conv_state.target, sizeof(conv_state.target), "%s", path);
+    conv_state.active = 1;
+
+    log_ts("EVENT: started conversion pid=%d target=%s", pid, path);
+    return 0;
+}
+
+// Handle conversion completion (called when conv_state.fd is readable)
+static void handle_conversion_complete(void) {
+    if (!conv_state.active) return;
+
+    log_ts("EVENT: conversion complete, processing result");
+
+    // Kill old players + run prelaunch hook
+    pid_t killed_pids[16];
+    int killed_count = kill_players_async(killed_pids, 16);
+    run_hook(hook_prelaunch, conv_state.target);
+    kill_players_wait(killed_pids, killed_count);
+
+    // Finish conversion
+    char player_path[PATH_MAX], wav_path[PATH_MAX];
+    if (finish_convert(conv_state.pid, conv_state.fd, player_path, wav_path, PATH_MAX) == 0) {
+        launch_player(player_path, wav_path);
+        log_play(conv_state.target);
+        snprintf(last_played, sizeof(last_played), "%s", conv_state.target);
+        log_ts("EVENT: player launched for %s", conv_state.target);
+    } else {
+        log_ts("EVENT: conversion failed for %s", conv_state.target);
+    }
+
+    conv_state.active = 0;
+    conv_state.pid = 0;
+    conv_state.fd = -1;
+    conv_state.target[0] = '\0';
+}
+
 // Launch player binary with wav file (double-fork so init reaps it)
 static void launch_player(const char *player, const char *wav) {
     log_ts("launch_player: input player=%s wav=%s", player, wav);
@@ -313,39 +384,6 @@ static void launch_player(const char *player, const char *wav) {
         waitpid(pid, NULL, 0);
         log_ts("launch_player: launched via double-fork");
     }
-}
-
-static void spawn_play(const char *path) {
-    log_ts("spawn_play: START path=%s", path);
-
-    // 1. Start conversion
-    pid_t convert_pid;
-    int convert_fd = start_convert(path, &convert_pid);
-    if (convert_fd < 0) {
-        log_ts("spawn_play: start_convert failed, aborting");
-        return;
-    }
-
-    // 2. In parallel: kill old players + prelaunch hook
-    log_ts("spawn_play: killing old players + prelaunch hook");
-    pid_t killed_pids[16];
-    int killed_count = kill_players_async(killed_pids, 16);
-    log_ts("spawn_play: killed %d players async", killed_count);
-    run_hook(hook_prelaunch, path);
-    log_ts("spawn_play: prelaunch hook done");
-    kill_players_wait(killed_pids, killed_count);
-    log_ts("spawn_play: players dead");
-
-    // 3. Wait for conversion, get results
-    char player_path[PATH_MAX], wav_path[PATH_MAX];
-    if (finish_convert(convert_pid, convert_fd, player_path, wav_path, PATH_MAX) != 0) {
-        log_ts("spawn_play: finish_convert failed, aborting");
-        return;
-    }
-
-    // 4. Launch player
-    launch_player(player_path, wav_path);
-    log_ts("spawn_play: END");
 }
 
 // Coalesce rapid next/prev commands, returns net offset
@@ -418,11 +456,11 @@ static void handle_command(int server_fd, int client_fd) {
         }
 
         if (path) {
-            spawn_play(path);
-            log_play(path);
-            if (path != last_played)
-                snprintf(last_played, sizeof(last_played), "%s", path);
-            dprintf(client_fd, "Playing: %s\n", strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
+            if (start_async_conversion(path) == 0) {
+                dprintf(client_fd, "Playing: %s\n", strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
+            } else {
+                dprintf(client_fd, "Conversion failed\n");
+            }
         } else {
             dprintf(client_fd, "Nothing playable\n");
         }
@@ -431,19 +469,22 @@ static void handle_command(int server_fd, int client_fd) {
         int last_fd;
         int offset = coalesce_navigation(server_fd, initial_offset, client_fd, &last_fd);
 
+        // If conversion is in progress, compute offset from current conversion target
+        const char *base = conv_state.active ? conv_state.target : last_played;
+        log_ts("EVENT: nav offset=%+d from base=%s (conv_active=%d)", offset, base, conv_state.active);
+
         char target[PATH_MAX];
-        if (get_next(last_played, offset, target, sizeof(target)) == 0) {
-            spawn_play(target);
-            log_play(target);
-            snprintf(last_played, sizeof(last_played), "%s", target);
-            const char *basename = strrchr(target, '/');
-            basename = basename ? basename + 1 : target;
-            if (offset == 1) {
-                dprintf(last_fd, "Next: %s\n", basename);
-            } else if (offset == -1) {
-                dprintf(last_fd, "Prev: %s\n", basename);
-            } else {
-                dprintf(last_fd, "Skipped %+d: %s\n", offset, basename);
+        if (get_next(base, offset, target, sizeof(target)) == 0) {
+            if (start_async_conversion(target) == 0) {
+                const char *basename = strrchr(target, '/');
+                basename = basename ? basename + 1 : target;
+                if (offset == 1) {
+                    dprintf(last_fd, "Next: %s\n", basename);
+                } else if (offset == -1) {
+                    dprintf(last_fd, "Prev: %s\n", basename);
+                } else {
+                    dprintf(last_fd, "Skipped %+d: %s\n", offset, basename);
+                }
             }
         }
         if (last_fd != client_fd) {
@@ -451,6 +492,7 @@ static void handle_command(int server_fd, int client_fd) {
         }
         return;  // client_fd already handled or will be closed by caller
     } else if (strcmp(action, "stop") == 0) {
+        cancel_conversion();  // Cancel any pending conversion
         kill_player();
         run_hook_async(hook_teardown, last_played);
         dprintf(client_fd, "Stopped\n");
@@ -514,11 +556,41 @@ int main(void) {
 
     fprintf(stderr, "[qua-socket] Listening on %s\n", SOCKET_PATH);
 
+    // Event loop
     while (1) {
-        int client_fd = accept(server_fd, NULL, NULL);
-        if (client_fd == -1) continue;
-        handle_command(server_fd, client_fd);
-        close(client_fd);
+        struct pollfd pfds[2];
+        int nfds = 1;
+
+        // Always poll server socket
+        pfds[0].fd = server_fd;
+        pfds[0].events = POLLIN;
+
+        // Optionally poll conversion pipe
+        if (conv_state.active) {
+            pfds[1].fd = conv_state.fd;
+            pfds[1].events = POLLIN;
+            nfds = 2;
+        }
+
+        log_ts("EVENT: poll nfds=%d conv_active=%d", nfds, conv_state.active);
+        int ret = poll(pfds, nfds, -1);  // Block indefinitely
+        if (ret <= 0) continue;
+
+        // Check conversion completion first (higher priority)
+        if (nfds == 2 && (pfds[1].revents & (POLLIN | POLLHUP))) {
+            log_ts("EVENT: conversion fd ready, revents=0x%x", pfds[1].revents);
+            handle_conversion_complete();
+        }
+
+        // Check for new client connections
+        if (pfds[0].revents & POLLIN) {
+            int client_fd = accept(server_fd, NULL, NULL);
+            if (client_fd != -1) {
+                log_ts("EVENT: new client connection");
+                handle_command(server_fd, client_fd);
+                close(client_fd);
+            }
+        }
     }
 
     posix_spawnattr_destroy(&global_attr);

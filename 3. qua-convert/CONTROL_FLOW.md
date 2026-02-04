@@ -2,27 +2,19 @@
 
 ## Overview
 
-`qua-convert` is a conversion-only tool. It converts audio files to WAV format and reports the appropriate player binary. It does **not** launch the player—that responsibility belongs to the upstream daemon.
+`qua-convert` is a pure conversion tool. It converts audio files to WAV format. It does **not** manage caching, select players, or launch playback—those responsibilities belong to the socket daemon (`qua-socket`).
 
-## Output Format
+## Usage
 
-On success, `qua-convert` prints two lines to stdout:
 ```
-<player-binary-path>
-<wav-file-path>
-```
-
-Example:
-```
-/usr/local/bin/qua-player-32-44100.pgo5992
-/home/user/.cache/qua/abc123.wav
+qua-convert <input-audio-file> <output-wav-path>
 ```
 
 ## Flow
 
 ```
 ┌─────────────────────────────────────────┐
-│           qua-convert <file>            │
+│  qua-convert <input> <output>           │
 └─────────────────┬───────────────────────┘
                   │
                   ▼
@@ -32,70 +24,29 @@ Example:
                   │
                   ▼
 ┌─────────────────────────────────────────┐
-│      Generate cache file path           │
-└─────────────────┬───────────────────────┘
-                  │
-                  ▼
-          ┌───────┴───────┐
-          │  Cache hit?   │
-          └───────┬───────┘
-                  │
-       ┌──────────┴──────────┐
-       │ YES                 │ NO
-       ▼                     ▼
-┌─────────────┐    ┌─────────────────────┐
-│ notify-send │    │ Manage cache size   │
-│ (cache hit) │    │ Decode audio        │
-└──────┬──────┘    │ Post-process if     │
-       │           │ needed (resample,   │
-       │           │ bit-depth, channels)│
-       │           └──────────┬──────────┘
-       │                      │
-       └──────────┬───────────┘
-                  │
-                  ▼
-┌─────────────────────────────────────────┐
-│   Select player binary based on WAV     │
-│   specs (bit-depth, sample-rate)        │
-│   Try PGO binary first, fallback to     │
-│   generic                               │
+│   Decode audio to output WAV file       │
+│   (FLAC, WavPack, etc.)                 │
 └─────────────────┬───────────────────────┘
                   │
                   ▼
 ┌─────────────────────────────────────────┐
-│   Print to stdout:                      │
-│     Line 1: player binary path          │
-│     Line 2: WAV file path               │
+│   Post-process if needed:               │
+│   - Bit depth conversion (16/24→32)     │
+│   - Sample rate conversion              │
+│   - Channel mixing (mono→stereo)        │
+└─────────────────┬───────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────┐
+│   Exit 0 (output WAV exists)            │
 └─────────────────────────────────────────┘
 ```
 
-## Daemon Integration
-
-The daemon (socket-based) orchestrates playback:
-
-```
-client sends play request via socket (fire and forget)
-    │
-    ▼
-daemon spawns qua-convert, waits for exit
-    │
-    ▼
-qua-convert does work, prints result to stdout, exits
-    │
-    ▼
-daemon reads stdout → gets player path + wav file
-    │
-    ▼
-daemon launches player (vfork/exec)
-```
-
-This keeps qua-convert as a pure conversion tool with no socket/daemon knowledge. The daemon handles all orchestration.
-
 ## Exit Codes
 
-- `0`: Success, player and WAV path printed to stdout
-- `1`: Error (file not found, conversion failed, no player binary found)
+- `0`: Success, output WAV file created
+- `1`: Error (file not found, conversion failed)
 
 ## Errors
 
-All errors are printed to stderr. Stdout contains only the two-line output on success.
+All errors are printed to stderr.

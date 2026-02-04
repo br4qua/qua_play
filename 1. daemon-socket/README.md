@@ -106,9 +106,22 @@ systemctl --user restart pipewire.socket pipewire-pulse.socket ...
 - **Next/Prev**: Scans directory for audio files, sorted alphabetically
 - **Supported formats**: flac, mp3, m4a, opus, ogg, wv, wav, ape, aiff
 
+## Cache & Conversion
+
+The daemon handles all caching and conversion:
+
+1. **Cache check**: Generates path from inode+mtime, checks if WAV exists
+2. **Conversion**: On cache miss, spawns `qua-convert` to decode audio
+3. **Cache management**: LRU eviction when cache exceeds 2GB
+4. **Player selection**: Reads WAV header, selects appropriate `qua-player-<bd>-<sr>`
+5. **Prefetching**: After play, converts next track in background
+
+**Cache location**: `/dev/shm/qua-cache/`
+
 ## Dependencies
 
 - `socat` - For the shell client
 - `fzf` - For history selection
-- `qua-play` - The actual player (spawned by daemon)
-- `qua-info` - For showing track metadata
+- `qua-convert` - Audio decoder (spawned by daemon on cache miss)
+- `qua-player-*` - Player binaries (bit-depth/sample-rate specific)
+- `qua-bare-launcher` - Player launcher wrapper

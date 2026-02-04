@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
-#include <signal.h>
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -12,7 +14,7 @@
 #include "qua_player_pgo.h" 
 #include "debug.h"
 #include "wav_header.h" // To parse Wav
-#define memcpy_custom avx512_stream_copy_zero
+#define memcpy_custom avx2_stream_copy_intrinsic
 
 extern void __gcov_reset(void);
 
@@ -356,58 +358,58 @@ int main(int argc, char *argv[])
   // const int npfds = snd_pcm_poll_descriptors_count(pcm_handle_cached);
   snd_pcm_poll_descriptors(pcm_handle_cached, pfd, npfds);
   PGO_PROFILING_RESET();
+  // XOR-pointer swap: toggle between two addresses with single XOR (no addition)
+  const uintptr_t dest0 = (uintptr_t)mmap_audio_base_cached;
+  const uintptr_t dest1 = (uintptr_t)(mmap_audio_base_cached + BYTES_PER_PERIOD);
+  const uintptr_t dest_toggle = dest0 ^ dest1;
+  uintptr_t dest = dest0;
   do
   {
-
     my_poll(pfd, npfds, -1);
-    memcpy_custom((sample_t *)__builtin_assume_aligned(mmap_audio_base_cached, ALIGN_4K),
+    memcpy_custom((sample_t *)__builtin_assume_aligned((void *)dest, ALIGN_4K),
                          (const sample_t *)__builtin_assume_aligned(src, ALIGN_4K));
     *appl_ptr += FRAMES_PER_PERIOD;
     snd_pcm_notify_hw(pcm_handle_cached);
-    
-    my_poll(pfd, npfds, -1);
-    memcpy_custom((sample_t *)__builtin_assume_aligned((mmap_audio_base_cached + BYTES_PER_PERIOD), ALIGN_4K),
-                         (const sample_t *)__builtin_assume_aligned(src + (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME), ALIGN_4K));
-    *appl_ptr += FRAMES_PER_PERIOD;
-    snd_pcm_notify_hw(pcm_handle_cached);
-   
-    src += (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME * 2);
-    iterations -= 2;
+
+    src += FRAMES_PER_PERIOD * SAMPLES_PER_FRAME;
+    dest ^= dest_toggle;  // Single XOR swaps between dest0 and dest1
+    iterations--;
 
   } while (likely(iterations > 0));
+  // Original 2-period unrolled loop (commented out - larger icache footprint)
+  // do
+  // {
+  //   my_poll(pfd, npfds, -1);
+  //   memcpy_custom((sample_t *)__builtin_assume_aligned(mmap_audio_base_cached, ALIGN_4K),
+  //                        (const sample_t *)__builtin_assume_aligned(src, ALIGN_4K));
+  //   *appl_ptr += FRAMES_PER_PERIOD;
+  //   snd_pcm_notify_hw(pcm_handle_cached);
+  //
+  //   my_poll(pfd, npfds, -1);
+  //   memcpy_custom((sample_t *)__builtin_assume_aligned((mmap_audio_base_cached + BYTES_PER_PERIOD), ALIGN_4K),
+  //                        (const sample_t *)__builtin_assume_aligned(src + (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME), ALIGN_4K));
+  //   *appl_ptr += FRAMES_PER_PERIOD;
+  //   snd_pcm_notify_hw(pcm_handle_cached);
+  //
+  //   src += (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME * 2);
+  //   iterations -= 2;
+  // } while (likely(iterations > 0));
   PGO_PROFILING_FLUSH();	
   
   snd_pcm_drain(pcm_handle_cached);
   snd_pcm_close(pcm_handle_cached);
   DEBUG_PRINT("\nPlayback completed!\n");
-  printf("DEBUG: About to call popen\n");
-  fflush(stdout);
-  FILE *fp = popen("pidof qua-signals", "r");
-  printf("DEBUG: popen returned %p\n", fp);
-  fflush(stdout);
-  
-  if (fp) {
-      pid_t pid;
-      printf("DEBUG: About to fscanf\n");
-      fflush(stdout);
-      if (fscanf(fp, "%d", &pid) == 1) {
-          printf("DEBUG: Found PID %d, sending signal\n", pid);
-          fflush(stdout);
-          kill(pid, SIGUSR1);
-          printf("DEBUG: Signal sent\n");
-          fflush(stdout);
-      } else {
-          printf("DEBUG: No PID found\n");
-          fflush(stdout);
-      }
-      printf("DEBUG: About to pclose\n");
-      fflush(stdout);
-      pclose(fp);
-      printf("DEBUG: pclose done\n");
-      fflush(stdout);
+
+  // Send "play-next" to socket daemon
+  int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (sock != -1) {
+    struct sockaddr_un addr = {.sun_family = AF_UNIX};
+    strncpy(addr.sun_path, QUA_SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+      write(sock, QUA_CMD_NEXT "\0", sizeof(QUA_CMD_NEXT) + 1);
+    }
+    close(sock);
   }
-  printf("DEBUG: Exiting normally\n");
-  fflush(stdout);
  
   // --- HUGE PAGE CLEANUP ---
   // munmap(audio_data, huge_page_aligned_size);

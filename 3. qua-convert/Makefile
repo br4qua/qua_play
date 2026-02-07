@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -O3 -march=native -mtune=native -flto -Wall
-LDFLAGS = -static -pthread -flto -lFLAC -lwavpack
+LDFLAGS = -static -pthread -flto
 # Target name
 TARGET = qua-convert
 # Source files (cache logic moved to qua-socket daemon)

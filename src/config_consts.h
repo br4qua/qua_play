@@ -63,4 +63,8 @@
 #define FRAMES_PER_BUFFER (BYTES_PER_BUFFER / BYTES_PER_AUDIO_FRAME)
 #define FRAMES_PER_PERIOD (FRAMES_PER_BUFFER / PERIODS_PER_BUFFER)
 
+// --- Socket Daemon Configuration ---
+#define QUA_SOCKET_PATH "/tmp/qua-socket.sock"
+#define QUA_CMD_NEXT "play-next"
+
 

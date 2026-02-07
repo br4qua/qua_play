@@ -19,17 +19,15 @@
 #include <sys/wait.h>
 #include <poll.h>
 
+#include "qua-cache.h"
+#include "qua-player-selector.h"
+
 #define QUA_CONVERT_CMD "qua-convert"
 #define QUA_LAUNCHER_CMD "qua-bare-launcher"
 #define SOCKET_PATH "/tmp/qua-socket.sock"
 #define LOCK_PATH "/tmp/qua-socket-daemon.lock"
 #define BUF_SIZE 4096
 #define COALESCE_TIMEOUT_MS 20
-
-// Cache configuration
-#define CACHE_DIR "/dev/shm/qua-cache"
-#define CACHE_MAX_SIZE (2ULL * 1024 * 1024 * 1024)
-#define PGO_SUFFIX ".pgo5992"
 
 extern char **environ;
 
@@ -51,184 +49,6 @@ static void log_ts(const char *fmt, ...) {
 #endif
 
 static posix_spawnattr_t global_attr;
-
-// ============================================================================
-// Cache Management
-// ============================================================================
-
-typedef struct {
-    char name[256];
-    time_t atime;
-    off_t size;
-} cache_entry_t;
-
-static int compare_atime(const void *a, const void *b) {
-    const cache_entry_t *ea = (const cache_entry_t *)a;
-    const cache_entry_t *eb = (const cache_entry_t *)b;
-    if (ea->atime < eb->atime) return -1;
-    if (ea->atime > eb->atime) return 1;
-    return 0;
-}
-
-static void cache_init(void) {
-    mkdir(CACHE_DIR, 0755);
-}
-
-// Generate cache path from source file (inode + mtime)
-static int cache_generate_path(const char *filepath, char *cache_path, size_t size) {
-    struct stat st;
-    if (stat(filepath, &st) != 0)
-        return -1;
-    snprintf(cache_path, size, "%s/qua-%lx-%lx.wav", CACHE_DIR,
-             (unsigned long)st.st_ino, (unsigned long)st.st_mtime);
-    return 0;
-}
-
-// Check if cache file exists
-static int cache_exists(const char *cache_path) {
-    struct stat st;
-    return (stat(cache_path, &st) == 0 && S_ISREG(st.st_mode));
-}
-
-// Manage cache size - delete old entries if over limit
-static void cache_manage_size(void) {
-    struct dirent **namelist;
-    int n = scandir(CACHE_DIR, &namelist, NULL, NULL);
-    if (n < 0) return;
-
-    cache_entry_t *entries = malloc(n * sizeof(cache_entry_t));
-    if (!entries) {
-        for (int i = 0; i < n; i++) free(namelist[i]);
-        free(namelist);
-        return;
-    }
-
-    int count = 0;
-    long long total = 0;
-
-    for (int i = 0; i < n; i++) {
-        if (namelist[i]->d_name[0] == '.') continue;
-        char p[PATH_MAX];
-        snprintf(p, sizeof(p), "%s/%s", CACHE_DIR, namelist[i]->d_name);
-        struct stat s;
-        if (stat(p, &s) == 0 && S_ISREG(s.st_mode)) {
-            strncpy(entries[count].name, namelist[i]->d_name, sizeof(entries[count].name) - 1);
-            entries[count].name[sizeof(entries[count].name) - 1] = '\0';
-            entries[count].atime = s.st_atime;
-            entries[count].size = s.st_size;
-            total += s.st_size;
-            count++;
-        }
-    }
-
-    // Sort by atime and delete until under threshold
-    if (total > CACHE_MAX_SIZE) {
-        qsort(entries, count, sizeof(cache_entry_t), compare_atime);
-        for (int i = 0; i < count && total > (long long)(CACHE_MAX_SIZE * 0.7); i++) {
-            char p[PATH_MAX];
-            snprintf(p, sizeof(p), "%s/%s", CACHE_DIR, entries[i].name);
-            unlink(p);
-            total -= entries[i].size;
-            log_ts("cache: deleted %s (%.1f MB)", entries[i].name, entries[i].size / 1048576.0);
-        }
-    }
-
-    free(entries);
-    for (int i = 0; i < n; i++) free(namelist[i]);
-    free(namelist);
-}
-
-// ============================================================================
-// WAV Header Parsing
-// ============================================================================
-
-static int parse_wav_header(const char *filepath, int *bits_per_sample, int *sample_rate, int *channels) {
-    int fd = open(filepath, O_RDONLY);
-    if (fd == -1) return -1;
-
-    uint8_t header[36];
-    ssize_t bytes_read = read(fd, header, 36);
-    if (bytes_read != 36) {
-        close(fd);
-        return -1;
-    }
-
-    // Check RIFF/WAVE header and fmt chunk
-    if (strncmp((char *)header, "RIFF", 4) != 0 ||
-        strncmp((char *)header + 8, "WAVE", 4) != 0 ||
-        strncmp((char *)header + 12, "fmt ", 4) != 0) {
-        close(fd);
-        return -1;
-    }
-
-    uint16_t num_channels = 0;
-    uint32_t sample_rate_val = 0;
-    uint16_t bits_per_sample_val = 0;
-
-    memcpy(&num_channels, header + 22, 2);
-    memcpy(&sample_rate_val, header + 24, 4);
-    memcpy(&bits_per_sample_val, header + 34, 2);
-
-    close(fd);
-
-    if (bits_per_sample) *bits_per_sample = bits_per_sample_val;
-    if (sample_rate) *sample_rate = sample_rate_val;
-    if (channels) *channels = num_channels;
-
-    return 0;
-}
-
-// ============================================================================
-// Player Selection
-// ============================================================================
-
-static int select_player(const char *cache_file, char *player_out, size_t player_size) {
-    int bd, sr, ch;
-    if (parse_wav_header(cache_file, &bd, &sr, &ch) != 0) {
-        log_ts("select_player: failed to parse WAV header");
-        return -1;
-    }
-
-    log_ts("select_player: WAV specs bd=%d sr=%d ch=%d", bd, sr, ch);
-
-    char s_bd[8], s_sr[16];
-    snprintf(s_bd, sizeof(s_bd), "%d", bd);
-    snprintf(s_sr, sizeof(s_sr), "%d", sr);
-
-    player_out[0] = '\0';
-
-    // Try specialized PGO binary first
-    char p_bin[128];
-    snprintf(p_bin, sizeof(p_bin), "qua-player-%s-%s" PGO_SUFFIX, s_bd, s_sr);
-    char q_cmd[PATH_MAX + 64];
-    snprintf(q_cmd, sizeof(q_cmd), "which %s 2>/dev/null", p_bin);
-    FILE *pwh = popen(q_cmd, "r");
-    if (pwh) {
-        if (fgets(player_out, player_size, pwh))
-            player_out[strcspn(player_out, "\n")] = 0;
-        pclose(pwh);
-    }
-
-    // Fallback to non-PGO binary
-    if (player_out[0] == '\0') {
-        char cmd[256];
-        snprintf(cmd, sizeof(cmd), "which qua-player-%s-%s 2>/dev/null", s_bd, s_sr);
-        pwh = popen(cmd, "r");
-        if (pwh) {
-            if (fgets(player_out, player_size, pwh))
-                player_out[strcspn(player_out, "\n")] = 0;
-            pclose(pwh);
-        }
-    }
-
-    if (player_out[0] == '\0') {
-        log_ts("select_player: no player binary found for %s-%s", s_bd, s_sr);
-        return -1;
-    }
-
-    log_ts("select_player: selected %s", player_out);
-    return 0;
-}
 
 static void run_hook(const char *hook, const char *audio_path) {
     if (access(hook, X_OK) != 0) return;
@@ -500,6 +320,39 @@ static void spawn_play(const char *path) {
     log_ts("spawn_play: END");
 }
 
+// Prefetch next track in background (fire and forget)
+static void prefetch_next(const char *current_path) {
+    char next_path[PATH_MAX];
+    if (get_next(current_path, 1, next_path, sizeof(next_path)) != 0) {
+        return;  // No next file
+    }
+
+    // Check if already cached
+    char cache_path[PATH_MAX];
+    if (cache_generate_path(next_path, cache_path, sizeof(cache_path)) != 0) {
+        return;
+    }
+    if (cache_exists(cache_path)) {
+        log_ts("prefetch: %s already cached", strrchr(next_path, '/') + 1);
+        return;
+    }
+
+    log_ts("prefetch: starting background convert for %s", strrchr(next_path, '/') + 1);
+
+    // Double-fork to run in background (init reaps)
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {
+            // Grandchild: run qua-convert
+            execlp(QUA_CONVERT_CMD, QUA_CONVERT_CMD, next_path, cache_path, NULL);
+            _exit(1);
+        }
+        _exit(0);
+    } else if (pid > 0) {
+        waitpid(pid, NULL, 0);  // Reap intermediate child (instant)
+    }
+}
+
 // Coalesce rapid next/prev commands, returns net offset
 static int coalesce_navigation(int server_fd, int initial_offset,
                                int first_client_fd, int *last_client_fd) {
@@ -575,6 +428,7 @@ static void handle_command(int server_fd, int client_fd) {
             if (path != last_played)
                 snprintf(last_played, sizeof(last_played), "%s", path);
             dprintf(client_fd, "Playing: %s\n", strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
+            prefetch_next(path);
         } else {
             dprintf(client_fd, "Nothing playable\n");
         }
@@ -597,6 +451,7 @@ static void handle_command(int server_fd, int client_fd) {
             } else {
                 dprintf(last_fd, "Skipped %+d: %s\n", offset, basename);
             }
+            prefetch_next(target);
         }
         if (last_fd != client_fd) {
             close(last_fd);

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Qua Play
+Exec=qua play %f
+MimeType=audio/flac;audio/x-wavpack;audio/wav;audio/aiff;audio/ape;audio/ogg;audio/mpeg;audio/mp4;audio/opus;
+NoDisplay=true

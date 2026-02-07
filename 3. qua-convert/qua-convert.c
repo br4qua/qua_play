@@ -33,15 +33,13 @@ int main(int argc, char *argv[]) {
   }
 
   // Decode audio to output file
-  int detected_bd, detected_sr, detected_ch;
+  wav_info_t detected;
   decode_params_t decode_params = {
     .input_path = input_file,
     .output_path = (char *)output_file,
     .output_buffer = NULL,
     .output_size = NULL,
-    .detected_bit_depth = &detected_bd,
-    .detected_sample_rate = &detected_sr,
-    .detected_channels = &detected_ch
+    .detected = &detected
   };
 
   pthread_t thread_convert;
@@ -56,22 +54,31 @@ int main(int argc, char *argv[]) {
   }
 
   // Get target values from configuration
-  int target_bd = qua_config_get_target_bit_depth(detected_bd);
-  int target_sr = qua_config_get_target_sample_rate(detected_sr);
+  int target_bd = qua_config_get_target_bit_depth(detected.bit_depth);
+  int target_sr = qua_config_get_target_sample_rate(detected.sample_rate);
 
   // Check if post-processing is needed
-  bool needs_post_process = (detected_ch != 2 || target_bd != detected_bd || target_sr != detected_sr);
+  bool needs_post_process = (detected.is_float || detected.channels != 2 ||
+                             target_bd != detected.bit_depth || target_sr != detected.sample_rate);
 
   if (needs_post_process) {
+    // Float conversion must go through sox (no fast path for float)
+    if (detected.is_float) {
+      fprintf(stderr, "Converting float to signed-integer PCM...\n");
+      if (qua_post_process(output_file, target_bd, target_sr, detected.channels) != 0) {
+        fprintf(stderr, "Error: Float conversion failed\n");
+        return 1;
+      }
+    }
     // FAST PATH: Only bit depth 24->32 conversion is needed
-    if (detected_bd == 24 && target_bd == 32 && detected_ch == 2 && detected_sr == target_sr) {
+    else if (detected.bit_depth == 24 && target_bd == 32 && detected.channels == 2 && detected.sample_rate == target_sr) {
       fprintf(stderr, "Applying fast 24-bit to 32-bit conversion...\n");
       if (convert_24bit_to_32bit_wav_ultrafast(output_file) != 0) {
         fprintf(stderr, "Error: Fast bit-depth conversion failed\n");
         return 1;
       }
     }
-    else if (detected_bd == 16 && target_bd == 32 && detected_ch == 2 && detected_sr == target_sr) {
+    else if (detected.bit_depth == 16 && target_bd == 32 && detected.channels == 2 && detected.sample_rate == target_sr) {
       fprintf(stderr, "Applying fast 16-bit to 32-bit conversion...\n");
       if (convert_16bit_to_32bit_wav_fast(output_file) != 0) {
         fprintf(stderr, "Error: Fast 16-bit conversion failed\n");
@@ -81,7 +88,7 @@ int main(int argc, char *argv[]) {
     // SLOW PATH: Channel mixing, resampling, or complex bit depth changes
     else {
       fprintf(stderr, "Applying standard post-processing (resampling/mixing)...\n");
-      if (qua_post_process(output_file, target_bd, target_sr, detected_ch) != 0) {
+      if (qua_post_process(output_file, target_bd, target_sr, detected.channels) != 0) {
         fprintf(stderr, "Error: Post-processing failed\n");
         return 1;
       }

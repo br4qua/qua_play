@@ -1,4 +1,2 @@
-control_symbols.lo: control_symbols.c /usr/include/stdc-predef.h \
- ctl_symbols_list.c
-/usr/include/stdc-predef.h:
+control_symbols.lo: control_symbols.c ctl_symbols_list.c
 ctl_symbols_list.c:

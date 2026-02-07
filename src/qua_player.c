@@ -350,7 +350,6 @@ int main(int argc, char *argv[])
       current_src,
       ALIGN_4K);
   const sample_t *const end_src = end_src_boundary;
-  sample_t iterations = (end_src - src) / (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME);
 
   // Declarations required for inlined poll() synchronization
   struct pollfd pfd[2];
@@ -373,9 +372,8 @@ int main(int argc, char *argv[])
 
     src += FRAMES_PER_PERIOD * SAMPLES_PER_FRAME;
     dest ^= dest_toggle;  // Single XOR swaps between dest0 and dest1
-    iterations--;
 
-  } while (likely(iterations > 0));
+  } while (likely(src != end_src));
   // Original 2-period unrolled loop (commented out - larger icache footprint)
   // do
   // {

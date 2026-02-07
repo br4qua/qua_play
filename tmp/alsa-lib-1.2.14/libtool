@@ -72,13 +72,13 @@ PATH_SEPARATOR=":"
 
 # The host system.
 host_alias=
-host=x86_64-pc-linux-gnu
-host_os=linux-gnu
+host=x86_64-pc-linux-musl
+host_os=linux-musl
 
 # The build system.
 build_alias=
-build=x86_64-pc-linux-gnu
-build_os=linux-gnu
+build=x86_64-pc-linux-musl
+build_os=linux-musl
 
 # A sed program that does not truncate output.
 SED="/usr/bin/sed"
@@ -102,7 +102,7 @@ NM="gcc-nm"
 LN_S="ln -s"
 
 # What is the maximum length of a command?
-max_cmd_len=3145728
+max_cmd_len=1572864
 
 # Object file suffix (normally "o").
 objext=o
@@ -176,7 +176,7 @@ old_postuninstall_cmds=""
 lock_old_archive_extraction=no
 
 # A C compiler.
-LTCC="gcc"
+LTCC="musl-gcc"
 
 # LTCC compiler flags.
 LTCFLAGS="-march=native -mtune=native -O3 -flto=auto"
@@ -329,7 +329,7 @@ reload_cmds="\$LD\$reload_flag -o \$output\$reload_objs"
 old_archive_cmds="\$AR \$AR_FLAGS \$oldlib\$oldobjs~\$RANLIB \$tool_oldlib"
 
 # A language specific compiler.
-CC="gcc"
+CC="musl-gcc"
 
 # Is the compiler the GNU compiler?
 with_gcc=yes

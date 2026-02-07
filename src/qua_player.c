@@ -7,6 +7,7 @@
 #include <stdlib.h>
 
 #include <alsa/asoundlib.h>   // Alsa
+#include <sys/ioctl.h>        // For direct ioctl in hot loop
 #include <sys/mman.h>         // For madvice
 #include "config_consts.h" // configurations
 #include "custom_memcpy.h" // Custom implementation of memcopy
@@ -331,6 +332,9 @@ int main(int argc, char *argv[])
   // Update pointer and notify
   snd_pcm_t *const pcm_handle_cached = pcm_handle;
   volatile snd_pcm_uframes_t *appl_ptr = snd_pcm_appl_ptr(pcm_handle_cached);
+  const int pcm_fd = snd_pcm_hw_fd(pcm_handle_cached);
+  void *const sync_ptr = snd_pcm_hw_sync_ptr(pcm_handle_cached);
+  const unsigned long sync_cmd = snd_pcm_sync_ptr_cmd();
   *appl_ptr += (FRAMES_PER_PERIOD * 2); // Advance by two periods
   snd_pcm_notify_hw(pcm_handle);
 
@@ -368,7 +372,10 @@ int main(int argc, char *argv[])
     memcpy_custom((sample_t *)__builtin_assume_aligned((void *)dest, ALIGN_4K),
                          (const sample_t *)__builtin_assume_aligned(src, ALIGN_4K));
     *appl_ptr += FRAMES_PER_PERIOD;
-    snd_pcm_notify_hw(pcm_handle_cached);
+    *(unsigned int *)sync_ptr = (1 << 2); // SNDRV_PCM_SYNC_PTR_AVAIL_MIN
+    my_ioctl(pcm_fd, sync_cmd, sync_ptr);
+    // ioctl(pcm_fd, sync_cmd, sync_ptr);
+    // snd_pcm_notify_hw(pcm_handle_cached);
 
     src += FRAMES_PER_PERIOD * SAMPLES_PER_FRAME;
     dest ^= dest_toggle;  // Single XOR swaps between dest0 and dest1

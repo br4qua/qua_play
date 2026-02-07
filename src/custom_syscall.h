@@ -22,4 +22,20 @@ static __attribute__((always_inline)) inline long my_poll(struct pollfd *fds, un
     return ret;
 }
 
+// Direct ioctl - no errno, no branch, no TLS write
+static __attribute__((always_inline)) inline void my_ioctl(int fd, unsigned long request, void *arg) {
+    register long rax __asm__("rax") = (long)__NR_ioctl;
+    register long rdi __asm__("rdi") = (long)fd;
+    register long rsi __asm__("rsi") = request;
+    register long rdx __asm__("rdx") = (long)arg;
+    long dummy_ret;
+
+    __asm__ __volatile__ (
+        "syscall"
+        : "=a"(dummy_ret)
+        : "r"(rax), "r"(rdi), "r"(rsi), "r"(rdx)
+        : "rcx", "r11", "memory"
+    );
+}
+
 #endif // CUSTOM_SYSCALL_H

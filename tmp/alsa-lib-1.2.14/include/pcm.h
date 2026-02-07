@@ -1425,3 +1425,6 @@ int snd_pcm_hw_params_set_tick_time_last(snd_pcm_t *pcm, snd_pcm_hw_params_t *pa
 // Direct access helpers (for static linking optimization)
 volatile snd_pcm_uframes_t* snd_pcm_appl_ptr(snd_pcm_t *pcm);
 void snd_pcm_notify_hw(snd_pcm_t *pcm);
+int snd_pcm_hw_fd(snd_pcm_t *pcm);
+void* snd_pcm_hw_sync_ptr(snd_pcm_t *pcm);
+unsigned long snd_pcm_sync_ptr_cmd(void);

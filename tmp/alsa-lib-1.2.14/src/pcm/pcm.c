@@ -9047,3 +9047,17 @@ __attribute__((always_inline)) inline volatile snd_pcm_uframes_t* snd_pcm_appl_p
 __attribute__((always_inline)) inline void snd_pcm_notify_hw(snd_pcm_t *pcm) {
     issue_applptr_xxx(pcm->private_data);
 }
+
+// BRYANT - Expose fd and sync_ptr for direct ioctl in hot loop
+__attribute__((always_inline)) inline int snd_pcm_hw_fd(snd_pcm_t *pcm) {
+    return ((snd_pcm_hw_t *)pcm->private_data)->fd;
+}
+
+__attribute__((always_inline)) inline void* snd_pcm_hw_sync_ptr(snd_pcm_t *pcm) {
+    return ((snd_pcm_hw_t *)pcm->private_data)->sync_ptr;
+}
+
+// Expose ioctl command for direct use in player hot loop
+__attribute__((always_inline)) inline unsigned long snd_pcm_sync_ptr_cmd(void) {
+    return SNDRV_PCM_IOCTL_SYNC_PTR;
+}

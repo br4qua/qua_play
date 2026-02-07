@@ -1,2 +1,1 @@
-timer_symbols.lo: timer_symbols.c /usr/include/stdc-predef.h
-/usr/include/stdc-predef.h:
+timer_symbols.lo: timer_symbols.c

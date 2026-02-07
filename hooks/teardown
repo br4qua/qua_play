@@ -1,0 +1,15 @@
+#!/bin/sh
+# teardown - Called AFTER player has stopped (async)
+#
+# Only runs on explicit stop, NOT during song transitions.
+# Use this hook to restore environment after playback ends.
+#
+# The audio file path is passed as $1
+
+picom &
+systemctl --user restart \
+    pipewire.socket \
+    pipewire-pulse.socket \
+    pipewire.service \
+    wireplumber.service \
+    pipewire-pulse.service

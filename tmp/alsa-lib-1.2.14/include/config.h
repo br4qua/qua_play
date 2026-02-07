@@ -83,7 +83,7 @@
 #define HAVE_INTTYPES_H 1
 
 /* Have LFS */
-#define HAVE_LFS 1
+/* #undef HAVE_LFS */
 
 /* Have libdl */
 /* #undef HAVE_LIBDL */

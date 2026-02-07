@@ -1,0 +1,18 @@
+#!/bin/sh
+# prelaunch - Called BEFORE launching the player (blocking)
+#
+# Runs in PARALLEL with killing the previous player instance.
+# Use this hook for setup that must complete before playback starts.
+# For async tasks, background them with &
+#
+# The audio file path is passed as $1
+
+# PIDS=$(pgrep qua-player)
+# kill -9 $PIDS 2>/dev/null & # Async - just sends signal, returns immediately
+# pkill -9 picom &
+systemctl --user stop pipewire-pulse.socket pipewire.socket pipewire-pulse.service wireplumber.service pipewire.service
+# for pid in $PIDS; do
+#     while kill -0 $pid 2>/dev/null; do
+#         sleep 0.1      # Wait loop AFTER
+#     done
+# done

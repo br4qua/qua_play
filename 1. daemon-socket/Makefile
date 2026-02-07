@@ -1,19 +1,24 @@
 CC = gcc
-CFLAGS = -Os -march=native -mtune=native -flto -Wall
-LDFLAGS = -flto -Wl,-O1 -Wl,--as-needed -Wl,--strip-all
+CFLAGS = -std=c23 -O3 -march=native -mtune=native -flto -fno-pie -Wall
+LDFLAGS = -flto -no-pie -Wl,-O1 -Wl,--as-needed -Wl,--strip-all
 TARGET = qua-socket
+SRCS = qua-socket.c qua-cache.c qua-player-selector.c
 PREFIX = /usr/local
 
 all: $(TARGET)
 
-$(TARGET): qua-socket.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(TARGET) qua-socket.c
+$(TARGET): $(SRCS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(TARGET) $(SRCS)
 
 install: $(TARGET)
 	install -m 755 $(TARGET) $(PREFIX)/bin/
+	install -m 755 qua-send $(PREFIX)/bin/
+	install -Dm 644 qua-play.desktop $(PREFIX)/share/applications/qua-play.desktop
 
 uninstall:
 	rm -f $(PREFIX)/bin/$(TARGET)
+	rm -f $(PREFIX)/bin/qua-send
+	rm -f $(PREFIX)/share/applications/qua-play.desktop
 
 clean:
 	rm -f $(TARGET)

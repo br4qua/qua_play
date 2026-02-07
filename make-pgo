@@ -6,31 +6,48 @@ BIN_DIR="./bin"
 PROFILE_DIR="./pgo_data"
 INSTALL_DIR="/usr/local/bin"
 
-PGO_SUFFIX=".pgo9" 
+PGO_SUFFIX=".pgo9992" 
 LAUNCHER="qua-bare-launcher"
+PROFILE_PREFIX_PATH="$(pwd)"
 
 TARGETS=(
     # 16-bit Targets
-    "16:44100:16bit_44100.wav"
-    "16:48000:16bit_48000.wav"
+    # "16:44100:16bit_44100.wav"
+    # "16:48000:16bit_48000.wav"
     # "16:88200:16bit_88200.wav"
     # "16:96000:16bit_96000.wav"
-    # "16:174000:16bit_17400.wav"
+    # "16:176400:16bit_176400.wav"
     # "16:192000:16bit_192000.wav"
     # 32-bit Targets
-    "32:44100:32bit_44100.wav"
-    "32:48000:32bit_48000.wav"
-    "32:88200:32bit_88200.wav"
-    "32:96000:32bit_96000.wav"
-    "32:174000:32bit_174000.wav"
+    # "32:44100:32bit_44100.wav"
+    # "32:48000:32bit_48000.wav"
+    # "32:88200:32bit_88200.wav"
+    # "32:96000:32bit_96000.wav"
+    # "32:176400:32bit_176400.wav"
     "32:192000:32bit_192000.wav"
 )
 # ------------------------------------------
 
-
+# REMOVE (bloats icache):
+#   - -funroll-loops - duplicates loop body, fills icache
+#   - -ftracer - duplicates code for superblocks
+# 
+#   KEEP (register efficiency):
+#   -fweb                    # Web-based register allocation
+#   -fira-loop-pressure      # IRA considers register pressure in loops
+#   -fsched-pressure         # Scheduler minimizes register pressure
+# 
+#   ADD (icache efficiency):
+#   -freorder-blocks-algorithm=stc   # Software trace cache - keeps hot blocks together
+#   -fira-hoist-pressure             # Consider register pressure when hoisting code
+# 
+#   CONSIDER (reduces padding/bloat):
+#   -fno-align-functions     # Don't pad functions (smaller icache footprint)
+#   -fno-align-loops         # Don't pad loops
+#   -fno-align-jumps         # Don't pad jumps
 
 # Compiler flags (mirrored from Makefile)
-CFLAGS="-std=gnu17 -D_POSIX_C_SOURCE=202405L \
+CFLAGS="-std=gnu23 -D_POSIX_C_SOURCE=202405L \
     -Wall \
     -Wextra \
     -Wno-maybe-uninitialized \
@@ -49,11 +66,13 @@ CFLAGS="-std=gnu17 -D_POSIX_C_SOURCE=202405L \
     -fallow-store-data-races \
     -fomit-frame-pointer \
     -fno-stack-protector \
+    -fweb \
+    -fira-loop-pressure \
+    -fsched-pressure \
     -no-pie \
     -fno-PIE \
     -fno-plt \
-    -ffunction-sections \
-    -fdata-sections \
+    -fno-semantic-interposition \
     -I./tmp/alsa-lib-1.2.14/src/pcm \
     -I./tmp/alsa-lib-1.2.14/include"
 
@@ -63,7 +82,7 @@ LDFLAGS_PROFILE="-no-pie \
     -flto=auto \
     -flto-partition=one \
     -Wl,-O3 \
-    -Wl,--emit-relocs \
+    -Wl,-z,now \
     -Wl,--as-needed \
     -Wl,--gc-sections \
     -Wl,--hash-style=gnu"
@@ -74,16 +93,17 @@ LDFLAGS_FINAL="-no-pie \
     -flto=auto \
     -flto-partition=one \
     -Wl,-O3 \
-    -Wl,--emit-relocs \
+    -Wl,-z,now \
     -Wl,--as-needed \
     -Wl,--gc-sections \
-    -Wl,--hash-style=gnu"
+    -Wl,--hash-style=gnu \
+    -Wl,--strip-all"
 
 LIBS="-Wl,-Bstatic -lgcov -lasound -Wl,-Bdynamic"
 
 # Create necessary directories
 mkdir -p "$BIN_DIR" "$PROFILE_DIR"
-pkill -9 qua-signals
+pkill -9 qua-socket
 echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
 
 echo ""
@@ -118,10 +138,11 @@ for TARGET in "${TARGETS[@]}"; do
     
     # 1. Instrumentation Build
     echo "  > 1. Building instrumented version (Output: $INST_BIN)"
-    gcc $CFLAGS -fprofile-generate="$PROFILE_SUBDIR" \
-    	-DPROFILING \
-        -DTARGET_BITDEPTH=$BITDEPTH -DTARGET_SAMPLE_RATE=$SAMPLERATE \
-        -o "$INST_BIN" src/qua_player.c $LDFLAGS_PROFILE $LIBS
+	gcc $CFLAGS -fprofile-generate="$PROFILE_SUBDIR" \
+	    -fprofile-prefix-path="$PROFILE_PREFIX_PATH" \
+	    -DPROFILING \
+	    -DTARGET_BITDEPTH=$BITDEPTH -DTARGET_SAMPLE_RATE=$SAMPLERATE \
+	    -o "$INST_BIN" src/qua_player.c $LDFLAGS_PROFILE $LIBS
     
     if [[ $? -ne 0 ]]; then
         echo "  > Error: Instrumentation build failed."
@@ -150,10 +171,11 @@ for TARGET in "${TARGETS[@]}"; do
     # 4. PGO Optimized Build
     echo "  > 3. Building PGO-optimized version -> $FINAL_BIN"
     # Capturing error output to help diagnose failure
-    BUILD_OUTPUT=$(gcc $CFLAGS -fprofile-use="$PROFILE_SUBDIR" -fprofile-correction \
-        -DTARGET_BITDEPTH=$BITDEPTH -DTARGET_SAMPLE_RATE=$SAMPLERATE \
-        -o "$FINAL_BIN" src/qua_player.c $LDFLAGS_FINAL $LIBS 2>&1)
-    BUILD_STATUS=$?
+BUILD_OUTPUT=$(gcc $CFLAGS -fprofile-use="$PROFILE_SUBDIR" -fprofile-correction \
+    -fprofile-prefix-path="$(pwd)" \
+    -DTARGET_BITDEPTH=$BITDEPTH -DTARGET_SAMPLE_RATE=$SAMPLERATE \
+    -o "$FINAL_BIN" src/qua_player.c $LDFLAGS_FINAL $LIBS 2>&1)
+BUILD_STATUS=$?
     
     if [[ $BUILD_STATUS -ne 0 ]]; then
         echo "  > FATAL Error: PGO optimization build failed (Exit Code: $BUILD_STATUS)."

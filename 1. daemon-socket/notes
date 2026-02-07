@@ -1,0 +1,1 @@
+current we are logging and i think the logging is blocking on the history write, this is slower and less reponsive when we are playing music. we should log after its played? Or keeep it async? additional maybe we want to keep the fd open so its even more responsive? what do you think?

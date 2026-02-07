@@ -12,7 +12,8 @@ Actions:
   next            Play next track in directory
   prev            Play previous track in directory
   stop            Stop playback
-  show            Show current track info
+  info            Show current track info
+  status          Show playback state (PLAYING/STOPPED)
   hist            Pick from history with fzf
   hist-rofi       Pick from history with rofi
   restart         Kill qua-socket, qua-player, qua-convert
@@ -92,7 +93,10 @@ case "$ACTION" in
             printf '%s\0%s\0' "play" "$path" | socat - UNIX-CONNECT:/tmp/qua-socket.sock
         fi
         ;;
-    show)
+    status)
+        printf '%s\0' "status" | socat - UNIX-CONNECT:/tmp/qua-socket.sock
+        ;;
+    info)
         path=$(printf '%s\0' "$ACTION" | socat - UNIX-CONNECT:/tmp/qua-socket.sock)
         echo "$path"
         qua-info "$path"

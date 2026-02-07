@@ -31,6 +31,7 @@ Follows Unix philosophy: small, focused components communicating via sockets/pip
 
 - **Explain before reading.** Before requesting to read any file, state why you need it.
   e.g. "I need to read qua-socket.c to understand the current accept loop before adding timeout logic."
+- **Never co-author.** Do not add Co-Authored-By lines to commits.
 
 ## Build Rules
 

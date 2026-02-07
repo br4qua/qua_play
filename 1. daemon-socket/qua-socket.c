@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
@@ -20,14 +19,9 @@
 #include <poll.h>
 
 #include "qua-cache.h"
+#include "qua-config.h"
+#include "qua-launcher.h"
 #include "qua-player-selector.h"
-
-#define QUA_CONVERT_CMD "qua-convert"
-#define QUA_LAUNCHER_CMD "qua-bare-launcher"
-#define SOCKET_PATH "/tmp/qua-socket.sock"
-#define LOCK_PATH "/tmp/qua-socket-daemon.lock"
-#define BUF_SIZE 4096
-#define COALESCE_TIMEOUT_MS 20
 
 extern char **environ;
 
@@ -78,6 +72,7 @@ static char history_path[PATH_MAX];
 static char hook_prelaunch[PATH_MAX];
 static char hook_teardown[PATH_MAX];
 static char last_played[PATH_MAX];
+static int state_is_playing;
 
 static int is_audio(const char *name) {
     const char *dot = strrchr(name, '.');
@@ -176,6 +171,30 @@ static void log_play(const char *path) {
     fclose(f);
 }
 
+// Check if any qua-player process is running
+static int player_is_running(void) {
+    DIR *proc = opendir("/proc");
+    if (!proc) return 0;
+
+    struct dirent *ent;
+    while ((ent = readdir(proc))) {
+        if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%s/comm", ent->d_name);
+
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+
+        char comm[32];
+        int found = fgets(comm, sizeof(comm), f) && strncmp(comm, "qua-player", 10) == 0;
+        fclose(f);
+        if (found) { closedir(proc); return 1; }
+    }
+    closedir(proc);
+    return 0;
+}
+
 // Native /proc-based player kill - no fork, direct syscalls
 static int kill_players_async(pid_t *pids, int max_pids) {
     DIR *proc = opendir("/proc");
@@ -260,11 +279,9 @@ static void launch_player(const char *player, const char *wav) {
     if (pid == 0) {
         // Intermediate child: fork again and exit
         if (fork() == 0) {
-            // Grandchild: exec the launcher
-            int fd = open("/dev/null", O_WRONLY);
-            if (fd != -1) { dup2(fd, STDOUT_FILENO); close(fd); }
-            execlp(QUA_LAUNCHER_CMD, QUA_LAUNCHER_CMD, "4", player, wav, "hw:0,0", NULL);
-            _exit(1);
+            // Grandchild: setup environment and exec player
+            char *args[] = {(char *)player, (char *)wav, "hw:0,0", NULL};
+            launcher_exec(LAUNCHER_CORE_ID, player, args);
         }
         _exit(0);  // Intermediate exits immediately
     } else if (pid > 0) {
@@ -425,6 +442,7 @@ static void handle_command(int server_fd, int client_fd) {
         if (path) {
             spawn_play(path);
             log_play(path);
+            state_is_playing = 1;
             if (path != last_played)
                 snprintf(last_played, sizeof(last_played), "%s", path);
             dprintf(client_fd, "Playing: %s\n", strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
@@ -441,6 +459,7 @@ static void handle_command(int server_fd, int client_fd) {
         if (get_next(last_played, offset, target, sizeof(target)) == 0) {
             spawn_play(target);
             log_play(target);
+            state_is_playing = 1;
             snprintf(last_played, sizeof(last_played), "%s", target);
             const char *basename = strrchr(target, '/');
             basename = basename ? basename + 1 : target;
@@ -459,9 +478,15 @@ static void handle_command(int server_fd, int client_fd) {
         return;  // client_fd already handled or will be closed by caller
     } else if (strcmp(action, "stop") == 0) {
         kill_player();
+        state_is_playing = 0;
         run_hook_async(hook_teardown, last_played);
         dprintf(client_fd, "Stopped\n");
-    } else if (strcmp(action, "show") == 0) {
+    } else if (strcmp(action, "status") == 0) {
+        if (state_is_playing && last_played[0])
+            dprintf(client_fd, "PLAYING %s\n", last_played);
+        else
+            dprintf(client_fd, "STOPPED\n");
+    } else if (strcmp(action, "info") == 0) {
         if (last_played[0]) {
             write(client_fd, last_played, strlen(last_played));
         }
@@ -472,6 +497,7 @@ int main(void) {
     init_paths();
     cache_init();
     find_playable_from_history(last_played, sizeof(last_played));
+    state_is_playing = player_is_running();
 
     // Single instance check
     int lock_fd = open(LOCK_PATH, O_CREAT | O_RDWR | O_CLOEXEC, 0666);

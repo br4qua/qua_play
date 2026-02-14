@@ -74,7 +74,7 @@ else
     export NM=nm
 fi
 
-export CC=gcc
+export CC=musl-gcc
 
 # 5.1: Initial CFLAGS/AM_CFLAGS for configure (Minimal LTO to pass checks)
 # Using -flto=auto for configure

@@ -17,6 +17,7 @@
 #include <libgen.h>
 #include <sys/wait.h>
 #include <poll.h>
+#include <pthread.h>
 
 #include "qua-cache.h"
 #include "qua-config.h"
@@ -26,7 +27,7 @@
 extern char **environ;
 
 // Debug logging with millisecond timestamps
-#define DEBUG_LOG
+// #define DEBUG_LOG
 #ifdef DEBUG_LOG
 static void log_ts(const char *fmt, ...) {
     struct timespec ts;
@@ -42,7 +43,6 @@ static void log_ts(const char *fmt, ...) {
 #define log_ts(...) ((void)0)
 #endif
 
-static posix_spawnattr_t global_attr;
 
 static void run_hook(const char *hook, const char *audio_path) {
     if (access(hook, X_OK) != 0) return;
@@ -54,20 +54,37 @@ static void run_hook(const char *hook, const char *audio_path) {
     }
 }
 
+struct hook_args {
+    char hook[PATH_MAX];
+    char audio_path[PATH_MAX];
+};
+
+static void *hook_worker(void *arg) {
+    struct hook_args *a = arg;
+    pid_t pid;
+    char *args[] = {a->hook, a->audio_path, NULL};
+    if (posix_spawn(&pid, a->hook, NULL, NULL, args, environ) == 0)
+        waitpid(pid, NULL, 0);
+    free(a);
+    return NULL;
+}
+
 static void run_hook_async(const char *hook, const char *audio_path) {
     if (access(hook, X_OK) != 0) return;
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        if (fork() == 0) {
-            execlp(hook, hook, audio_path, NULL);
-            _exit(1);
-        }
-        _exit(0);
-    } else if (pid > 0) {
-        waitpid(pid, NULL, 0);
+    struct hook_args *a = malloc(sizeof(*a));
+    if (!a) return;
+    snprintf(a->hook, sizeof(a->hook), "%s", hook);
+    snprintf(a->audio_path, sizeof(a->audio_path), "%s", audio_path);
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, hook_worker, a) == 0) {
+        pthread_detach(tid);
+    } else {
+        free(a);
     }
 }
+static FILE *history_fp;
 static char history_path[PATH_MAX];
 static char hook_prelaunch[PATH_MAX];
 static char hook_teardown[PATH_MAX];
@@ -122,11 +139,23 @@ static int get_next(const char *current, int offset, char *result, size_t size) 
 // TODO: Add logging for loaded paths and errors (missing XDG_CONFIG_HOME, etc.)
 static void init_paths(void) {
     const char *config = getenv("XDG_CONFIG_HOME");
-    if (!config) return;
+    char config_fallback[PATH_MAX];
+    if (!config) {
+        snprintf(config_fallback, sizeof(config_fallback),
+                 "%s/.config", getenv("HOME"));
+        config = config_fallback;
+    }
 
     snprintf(history_path, sizeof(history_path), "%s/qua-player/history", config);
     snprintf(hook_prelaunch, sizeof(hook_prelaunch), "%s/qua-player/hooks/prelaunch", config);
     snprintf(hook_teardown, sizeof(hook_teardown), "%s/qua-player/hooks/teardown", config);
+
+    // Ensure history directory exists, keep fd open for lifetime
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%.*s",
+             (int)(strrchr(history_path, '/') - history_path), history_path);
+    mkdir(dir, 0755);
+    history_fp = fopen(history_path, "a");
 }
 
 static int find_playable_from_history(char *result, size_t size) {
@@ -156,19 +185,10 @@ static int find_playable_from_history(char *result, size_t size) {
     return found ? 0 : 1;
 }
 
-static void log_play(const char *path) {
-    if (!history_path[0]) return;
-
-    // Ensure directory exists
-    char dir[PATH_MAX];
-    snprintf(dir, sizeof(dir), "%.*s", (int)(strrchr(history_path, '/') - history_path), history_path);
-    mkdir(dir, 0755);
-
-    FILE *f = fopen(history_path, "a");
-    if (!f) return;
-
-    fprintf(f, "%ld %s\n", time(NULL), path);
-    fclose(f);
+static void log_play_history(const char *path) {
+    if (!history_fp) return;
+    fprintf(history_fp, "%ld %s\n", time(NULL), path);
+    fflush(history_fp);
 }
 
 // Check if any qua-player process is running
@@ -291,8 +311,13 @@ static void launch_player(const char *player, const char *wav) {
     }
 }
 
+static void prefetch_join(void);
+
 static void spawn_play(const char *path) {
     log_ts("spawn_play: START path=%s", path);
+
+    // Wait for any running prefetch (may have produced our cache file)
+    prefetch_join();
 
     // 1. Generate cache path
     char cache_path[PATH_MAX];
@@ -337,36 +362,67 @@ static void spawn_play(const char *path) {
     log_ts("spawn_play: END");
 }
 
-// Prefetch next track in background (fire and forget)
-static void prefetch_next(const char *current_path) {
+// Prefetch state
+static pthread_t prefetch_tid;
+static int prefetch_active;
+
+// Prefetch next track in background thread
+
+struct prefetch_args {
+    char current_path[PATH_MAX];
+};
+
+static void *prefetch_worker(void *arg) {
+    struct prefetch_args *a = arg;
+
     char next_path[PATH_MAX];
-    if (get_next(current_path, 1, next_path, sizeof(next_path)) != 0) {
-        return;  // No next file
+    if (get_next(a->current_path, 1, next_path, sizeof(next_path)) != 0) {
+        free(a);
+        return NULL;
     }
 
-    // Check if already cached
     char cache_path[PATH_MAX];
     if (cache_generate_path(next_path, cache_path, sizeof(cache_path)) != 0) {
-        return;
+        free(a);
+        return NULL;
     }
     if (cache_exists(cache_path)) {
         log_ts("prefetch: %s already cached", strrchr(next_path, '/') + 1);
-        return;
+        free(a);
+        return NULL;
     }
 
-    log_ts("prefetch: starting background convert for %s", strrchr(next_path, '/') + 1);
+    log_ts("prefetch: starting background convert for %s",
+           strrchr(next_path, '/') + 1);
 
-    // Double-fork to run in background (init reaps)
-    pid_t pid = fork();
-    if (pid == 0) {
-        if (fork() == 0) {
-            // Grandchild: run qua-convert
-            execlp(QUA_CONVERT_CMD, QUA_CONVERT_CMD, next_path, cache_path, NULL);
-            _exit(1);
-        }
-        _exit(0);
-    } else if (pid > 0) {
-        waitpid(pid, NULL, 0);  // Reap intermediate child (instant)
+    pid_t pid;
+    char *args[] = {QUA_CONVERT_CMD, next_path, cache_path, NULL};
+    if (posix_spawnp(&pid, QUA_CONVERT_CMD, NULL, NULL, args, environ) == 0)
+        waitpid(pid, NULL, 0);
+
+    log_ts("prefetch: done %s", strrchr(next_path, '/') + 1);
+    free(a);
+    return NULL;
+}
+
+static void prefetch_join(void) {
+    if (prefetch_active) {
+        pthread_join(prefetch_tid, NULL);
+        prefetch_active = 0;
+    }
+}
+
+static void prefetch_next(const char *current_path) {
+    prefetch_join();
+
+    struct prefetch_args *a = malloc(sizeof(*a));
+    if (!a) return;
+    snprintf(a->current_path, sizeof(a->current_path), "%s", current_path);
+
+    if (pthread_create(&prefetch_tid, NULL, prefetch_worker, a) == 0) {
+        prefetch_active = 1;
+    } else {
+        free(a);
     }
 }
 
@@ -441,11 +497,11 @@ static void handle_command(int server_fd, int client_fd) {
 
         if (path) {
             spawn_play(path);
-            log_play(path);
             state_is_playing = 1;
             if (path != last_played)
                 snprintf(last_played, sizeof(last_played), "%s", path);
             dprintf(client_fd, "Playing: %s\n", strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
+            log_play_history(path);
             prefetch_next(path);
         } else {
             dprintf(client_fd, "Nothing playable\n");
@@ -458,7 +514,6 @@ static void handle_command(int server_fd, int client_fd) {
         char target[PATH_MAX];
         if (get_next(last_played, offset, target, sizeof(target)) == 0) {
             spawn_play(target);
-            log_play(target);
             state_is_playing = 1;
             snprintf(last_played, sizeof(last_played), "%s", target);
             const char *basename = strrchr(target, '/');
@@ -470,6 +525,7 @@ static void handle_command(int server_fd, int client_fd) {
             } else {
                 dprintf(last_fd, "Skipped %+d: %s\n", offset, basename);
             }
+            log_play_history(target);
             prefetch_next(target);
         }
         if (last_fd != client_fd) {
@@ -495,6 +551,7 @@ static void handle_command(int server_fd, int client_fd) {
 
 int main(void) {
     init_paths();
+    init_player_paths();
     cache_init();
     find_playable_from_history(last_played, sizeof(last_played));
     state_is_playing = player_is_running();
@@ -529,19 +586,8 @@ int main(void) {
         return 1;
     }
 
-    // Initialize spawn attributes
-    posix_spawnattr_init(&global_attr);
-    short flags = POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
-    posix_spawnattr_setflags(&global_attr, flags);
-
-    sigset_t all_signals, no_signals;
-    sigfillset(&all_signals);
-    sigemptyset(&no_signals);
-    posix_spawnattr_setsigdefault(&global_attr, &all_signals);
-    posix_spawnattr_setsigmask(&global_attr, &no_signals);
-
-    // No SIGCHLD handler - we use explicit waitpid for all children
-    // Fire-and-forget children use double-fork so init reaps them
+    // No SIGCHLD handler needed. Synchronous children use specific-PID waitpid.
+    // Prefetch and async hooks run on worker threads that reap their own children.
 
     // Ignore SIGPIPE (broken pipe when client disconnects)
     signal(SIGPIPE, SIG_IGN);
@@ -555,6 +601,5 @@ int main(void) {
         close(client_fd);
     }
 
-    posix_spawnattr_destroy(&global_attr);
     return 0;
 }

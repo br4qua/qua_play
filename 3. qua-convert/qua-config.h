@@ -4,7 +4,7 @@
 #include <stdbool.h>
 
 // Configuration: Valid bit depths (space-separated)
-#define BIT_DEPTH_VALID "32"
+#define BIT_DEPTH_VALID "16 32"
 
 // Configuration: Force playback at specific bit depth (empty = false, or value like "32")
 #define BIT_DEPTH_OVERRIDE ""

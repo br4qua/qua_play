@@ -1,0 +1,12 @@
+Cleanup change: removed pcm_handle_cached alias
+
+The redundant `snd_pcm_t *const pcm_handle_cached = pcm_handle;` alias
+was removed. All usages now reference `pcm_handle` directly (already const).
+
+ACTION: Verify the final binary is unaffected by comparing output of:
+  objdump -d <old_binary> > old.asm
+  objdump -d <new_binary> > new.asm
+  diff old.asm new.asm
+
+If the compiler treated the alias differently (e.g., register pinning),
+the hot loop codegen may differ. Check the do{} loop section specifically.

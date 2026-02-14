@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
+
 static void send_cmd(const char *cmd) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     struct sockaddr_un addr = { .sun_family = AF_UNIX };

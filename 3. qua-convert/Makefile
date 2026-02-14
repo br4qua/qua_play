@@ -1,5 +1,5 @@
-CC = gcc
-CFLAGS = -O3 -march=native -mtune=native -flto -Wall
+CC = musl-gcc
+CFLAGS = -O2 -march=native -mtune=native -flto -Wall
 LDFLAGS = -static -pthread -flto
 # Target name
 TARGET = qua-convert

@@ -1,1 +1,17 @@
 current we are logging and i think the logging is blocking on the history write, this is slower and less reponsive when we are playing music. we should log after its played? Or keeep it async? additional maybe we want to keep the fd open so its even more responsive? what do you think?
+
+
+Current state:
+  ┌──────────────────────────┬─────────────────────────┬───────────────────────────────────────────────────────────┐
+  │           What           │           How           │                            Why                            │
+  ├──────────────────────────┼─────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ Player launch (line 294) │ double-fork             │ needs launcher_exec (affinity, RT, OOM, ASLR, FD cleanup) │
+  ├──────────────────────────┼─────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ Sync convert (line 261)  │ posix_spawn + waitpid   │ need exit status, blocks intentionally                    │
+  ├──────────────────────────┼─────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ Sync hook (line 53)      │ posix_spawn + waitpid   │ need to wait for completion                               │
+  ├──────────────────────────┼─────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ Prefetch (line 418)      │ pthread_create + join   │ thread spawns qua-convert, waits, no zombie               │
+  ├──────────────────────────┼─────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ Async hook (line 82)     │ pthread_create + detach │ thread spawns hook, waits, no zombie                      │
+  └──────────────────────────┴─────────────────────────┴───────────────────────────────────────────────────────────┘

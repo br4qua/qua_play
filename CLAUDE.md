@@ -32,6 +32,8 @@ Follows Unix philosophy: small, focused components communicating via sockets/pip
 - **Explain before reading.** Before requesting to read any file, state why you need it.
   e.g. "I need to read qua-socket.c to understand the current accept loop before adding timeout logic."
 - **Never co-author.** Do not add Co-Authored-By lines to commits.
+- **Never diff git commit.** Do not run `git diff` or `git log` when committing.
+- **Confirm before wide searches.** If a grep/search would span more than 5 files, ask the user to confirm before running it — the library directories can be huge.
 
 ## Build Rules
 

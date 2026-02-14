@@ -1,0 +1,14 @@
+# Clean ups
+
+consider clean up config files for just definitions
+remove cache references, that should be handled externally
+
+# Speed 
+consider using ffmpeg for fastest decode path (for flac), and possible use qua-info's code for the fastest read on flac vorbis early bytes
+
+test ffmpeg decode correctness + speed for wvpack
+
+test post-processing speed, sox vs ffmpeg (ffmpeg might be faster?), if so can be one shotted?
+
+bigger tasks 
+

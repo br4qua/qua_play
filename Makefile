@@ -7,7 +7,7 @@ BINDIR = bin
 # 🚀 Presets Configuration 🚀
 # --------------------------------------------------------------------------
 # Space-separated list of sample rates to build optimized binaries for.
-SAMPLE_RATES = 44100 48000 #96000 88200 192000 #176400 352800 384000
+SAMPLE_RATES = 44100 48000 96000 192000 88200 176400 352800 384000
 BITDEPTHS = 16 32
 
 # Generate a list of all output binaries (e.g., bin/qua-player-16-44100, bin/qua-player-32-44100)
@@ -40,6 +40,8 @@ CFLAGS = -std=gnu23 -D_POSIX_C_SOURCE=202405L \
 -fno-PIE \
 -fno-plt \
 -fno-semantic-interposition \
+-fdata-sections \
+-ffunction-sections \
 -I./tmp/alsa-lib-1.2.14/src/pcm \
 -I./tmp/alsa-lib-1.2.14/include
 
@@ -56,8 +58,7 @@ LDFLAGS = -static \
 -flto-partition=one \
 -Wl,-O2 \
 -Wl,--gc-sections \
--Wl,--strip-all
-       
+-Wl,--strip-all   
 LIBS = -lasound
 
 # Installation directories

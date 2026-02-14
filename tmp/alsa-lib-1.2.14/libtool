@@ -299,7 +299,7 @@ hardcode_into_libs=yes
 sys_lib_search_path_spec="/usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1 /usr/lib /lib "
 
 # Detected run-time system search path for libraries.
-sys_lib_dlsearch_path_spec="/lib /usr/lib /opt/intel/oneapi/compiler/latest/linux/lib /opt/intel/oneapi/compiler/latest/lib /opt/intel/oneapi/compiler/2025.0/lib/ /opt/intel/oneapi/lib/intel64 /opt/intel/oneapi/compiler/latest/linux/compiler/lib/intel64 /usr/lib32 /usr/lib/perf /usr/lib/libfakeroot "
+sys_lib_dlsearch_path_spec="/lib /usr/lib /opt/intel/oneapi/compiler/latest/linux/lib /opt/intel/oneapi/compiler/latest/lib /opt/intel/oneapi/compiler/2025.0/lib/ /opt/intel/oneapi/lib/intel64 /opt/intel/oneapi/compiler/latest/linux/compiler/lib/intel64 /usr/lib32 /usr/lib/perf /opt/rocm/lib /usr/lib/libfakeroot "
 
 # Explicit LT_SYS_LIBRARY_PATH set during ./configure time.
 configure_time_lt_sys_library_path=""

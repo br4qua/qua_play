@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+# Root
+make -C "$ROOT" clean all
+
+# Sub-projects
+make -C "$ROOT/1. daemon-socket" clean all
+make -C "$ROOT/2. launcher-standalone" clean all
+make -C "$ROOT/3. qua-convert" clean all
+make -C "$ROOT/4. x11-hotkeys-daemon" clean all

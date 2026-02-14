@@ -6,25 +6,25 @@ BIN_DIR="./bin"
 PROFILE_DIR="./pgo_data"
 INSTALL_DIR="/usr/local/bin"
 
-PGO_SUFFIX=".pgo9992" 
+PGO_SUFFIX=".pgo9994" 
 LAUNCHER="qua-bare-launcher"
 PROFILE_PREFIX_PATH="$(pwd)"
 
 TARGETS=(
     # 16-bit Targets
-    # "16:44100:16bit_44100.wav"
-    # "16:48000:16bit_48000.wav"
+    "16:44100:16bit_44100.wav"
+    "16:48000:16bit_48000.wav"
     # "16:88200:16bit_88200.wav"
     # "16:96000:16bit_96000.wav"
     # "16:176400:16bit_176400.wav"
     # "16:192000:16bit_192000.wav"
     # 32-bit Targets
-    # "32:44100:32bit_44100.wav"
-    # "32:48000:32bit_48000.wav"
+    "32:44100:32bit_44100.wav"
+    "32:48000:32bit_48000.wav"
     # "32:88200:32bit_88200.wav"
     # "32:96000:32bit_96000.wav"
     # "32:176400:32bit_176400.wav"
-    "32:192000:32bit_192000.wav"
+    # "32:192000:32bit_192000.wav"
 )
 # ------------------------------------------
 
@@ -52,7 +52,7 @@ CFLAGS="-std=gnu23 -D_POSIX_C_SOURCE=202405L \
     -Wextra \
     -Wno-maybe-uninitialized \
     -Wno-unused-but-set-variable \
-    -O3 \
+    -O2 \
     -march=native \
     -mtune=native \
     -flto=auto \
@@ -60,8 +60,6 @@ CFLAGS="-std=gnu23 -D_POSIX_C_SOURCE=202405L \
     -fno-fat-lto-objects \
     -fipa-pta \
     -fivopts \
-    -fdevirtualize-at-ltrans \
-    -ftree-loop-distribution \
     -frename-registers \
     -fallow-store-data-races \
     -fomit-frame-pointer \
@@ -81,7 +79,7 @@ LDFLAGS_PROFILE="-no-pie \
     -Wl,-rpath=./lib \
     -flto=auto \
     -flto-partition=one \
-    -Wl,-O3 \
+    -Wl,-O2 \
     -Wl,-z,now \
     -Wl,--as-needed \
     -Wl,--gc-sections \
@@ -92,7 +90,7 @@ LDFLAGS_FINAL="-no-pie \
     -Wl,-rpath=./lib \
     -flto=auto \
     -flto-partition=one \
-    -Wl,-O3 \
+    -Wl,-O2 \
     -Wl,-z,now \
     -Wl,--as-needed \
     -Wl,--gc-sections \

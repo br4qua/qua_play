@@ -88,7 +88,7 @@ void *convert_audio(void *arg) {
   case 'f': // .flac
     if (strcmp(ext, "flac") == 0) {
       if ((pid = vfork()) == 0) {
-        execlp("flac", "flac", "-d", "-f", params->input_path, "-o", output_file, NULL);
+        execlp("flac", "flac", "-d", "--decode-through-errors", "-f", params->input_path, "-o", output_file, NULL);
         _exit(1);
       }
       break;

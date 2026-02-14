@@ -8,15 +8,14 @@
 
 #include <alsa/asoundlib.h>   // Alsa
 #include <sys/ioctl.h>        // For direct ioctl in hot loop
-#include <sys/mman.h>         // For madvise
+#include <sys/mman.h>         // For madvice
 #include "config_consts.h" // configurations
-#include "custom_memcpy.h" // Custom implementation of memcpy
+#include "custom_memcpy.h" // Custom implementation of memcopy
 #include "custom_syscall.h" // For Custom syscalls
 #include "qua_player_pgo.h" 
 #include "debug.h"
 #include "wav_header.h" // To parse Wav
 #define memcpy_custom avx2_stream_copy_intrinsic
-#define SNDRV_PCM_SYNC_PTR_AVAIL_MIN (1 << 2)
 
 extern void __gcov_reset(void);
 
@@ -35,7 +34,7 @@ static int setup_alsa(snd_pcm_t **handle, const char *device)
 #ifdef DEBUG
   if (err < 0)
   {
-    fprintf(stderr, "Cannot open audio device: %s\n",
+    fprintf(stderr, "Cannot allocate hardware parameters: %s\n",
             snd_strerror(err));
     return -1;
   }
@@ -144,11 +143,10 @@ static int setup_alsa(snd_pcm_t **handle, const char *device)
   return snd_pcm_prepare(*handle);
 }
 
-__attribute__((optimize("align-loops=64")))
 int main(int argc, char *argv[])
 {
   // Lock memory for real-time performance
-  WavHeader header = {0};
+    WavHeader header = {0};
   int err = mlockall(MCL_CURRENT | MCL_FUTURE);
 #ifdef DEBUG
   if (unlikely(err  == -1))
@@ -240,7 +238,7 @@ int main(int argc, char *argv[])
   if (unlikely(lseek(fd, data_offset, SEEK_SET) != data_offset))
   {
     fprintf(stderr, "Failed to seek to audio data\n");
-    munmap(audio_data_writable, HUGE_PAGE_SIZE);
+    munmap(audio_data, huge_page_aligned_size); // Use munmap for cleanup
     close(fd);
     return -1;
   }
@@ -256,7 +254,7 @@ int main(int argc, char *argv[])
     if (unlikely(bytes_read <= 0))
     {
       fprintf(stderr, "Failed to read audio data\n");
-      munmap(audio_data_writable, HUGE_PAGE_SIZE);
+      munmap(audio_data, huge_page_aligned_size); // Use munmap for cleanup
       snd_pcm_close(pcm_handle);
       close(fd);
       return -1;
@@ -283,7 +281,7 @@ int main(int argc, char *argv[])
   const size_t total_frames = header.data_bytes / (2 * sizeof(sample_t));
 
   const sample_t *current_src = audio_data;
-  // Pad with zeros to wait for drain
+  // Padds some zero to wait for drain
   const sample_t *const end_src_boundary = audio_data + (total_frames * SAMPLES_PER_FRAME) +
                                            (((FRAMES_PER_PERIOD * SAMPLES_PER_FRAME) - ((total_frames * SAMPLES_PER_FRAME) % (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME))) % (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME)) +
                                            (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME);
@@ -358,7 +356,6 @@ int main(int argc, char *argv[])
   const sample_t *const end_src = end_src_boundary;
 
   // Declarations required for inlined poll() synchronization
-  // TODO: investigate why pfd is sized [2] when npfds = 1
   struct pollfd pfd[2];
   const int npfds = 1;
   // const int npfds = snd_pcm_poll_descriptors_count(pcm_handle_cached);
@@ -369,26 +366,21 @@ int main(int argc, char *argv[])
   const uintptr_t dest1 = (uintptr_t)(mmap_audio_base_cached + BYTES_PER_PERIOD);
   const uintptr_t dest_toggle = dest0 ^ dest1;
   uintptr_t dest = dest0;
-  // asm volatile(".byte 0xCC, 0xCC, 0xCC" :::);
-  
   do
   {
-    __asm__ volatile (".p2align 6" ::: "memory"); // Force 64-byte alignment for outer loop
     my_poll(pfd, npfds, -1);
     memcpy_custom((sample_t *)__builtin_assume_aligned((void *)dest, ALIGN_4K),
                          (const sample_t *)__builtin_assume_aligned(src, ALIGN_4K));
     *appl_ptr += FRAMES_PER_PERIOD;
-    *(unsigned int *)sync_ptr = SNDRV_PCM_SYNC_PTR_AVAIL_MIN;
+    *(unsigned int *)sync_ptr = (1 << 2); // SNDRV_PCM_SYNC_PTR_AVAIL_MIN
     my_ioctl(pcm_fd, sync_cmd, sync_ptr);
     // ioctl(pcm_fd, sync_cmd, sync_ptr);
-    // snd_pcm_notify_hw(pcm_handle);
+    // snd_pcm_notify_hw(pcm_handle_cached);
 
     src += FRAMES_PER_PERIOD * SAMPLES_PER_FRAME;
     dest ^= dest_toggle;  // Single XOR swaps between dest0 and dest1
 
   } while (likely(src != end_src));
-  // asm volatile(".byte 0xDD, 0xDD, 0xDD" :::);
-  
 
   // Original 2-period unrolled loop (commented out - larger icache footprint)
   // do
@@ -397,21 +389,21 @@ int main(int argc, char *argv[])
   //   memcpy_custom((sample_t *)__builtin_assume_aligned(mmap_audio_base_cached, ALIGN_4K),
   //                        (const sample_t *)__builtin_assume_aligned(src, ALIGN_4K));
   //   *appl_ptr += FRAMES_PER_PERIOD;
-  //   snd_pcm_notify_hw(pcm_handle);
+  //   snd_pcm_notify_hw(pcm_handle_cached);
   //
   //   my_poll(pfd, npfds, -1);
   //   memcpy_custom((sample_t *)__builtin_assume_aligned((mmap_audio_base_cached + BYTES_PER_PERIOD), ALIGN_4K),
   //                        (const sample_t *)__builtin_assume_aligned(src + (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME), ALIGN_4K));
   //   *appl_ptr += FRAMES_PER_PERIOD;
-  //   snd_pcm_notify_hw(pcm_handle);
+  //   snd_pcm_notify_hw(pcm_handle_cached);
   //
   //   src += (FRAMES_PER_PERIOD * SAMPLES_PER_FRAME * 2);
   //   iterations -= 2;
   // } while (likely(iterations > 0));
   PGO_PROFILING_FLUSH();	
   
-  snd_pcm_drain(pcm_handle);
-  snd_pcm_close(pcm_handle);
+  snd_pcm_drain(pcm_handle_cached);
+  snd_pcm_close(pcm_handle_cached);
   DEBUG_PRINT("\nPlayback completed!\n");
 
   // Send "play-next" to socket daemon
@@ -426,6 +418,6 @@ int main(int argc, char *argv[])
   }
  
   // --- HUGE PAGE CLEANUP ---
-  // munmap(audio_data_writable, HUGE_PAGE_SIZE);
+  // munmap(audio_data, huge_page_aligned_size);
   return 0;
 }

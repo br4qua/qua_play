@@ -7,7 +7,7 @@ APE, MP3, M4A, Opus, OGG, AIFF) to WAV for playback by qua-player.
 
 ## Status
 
-Functional. May receive updates.
+Functional.
 
 ## Behavior
 

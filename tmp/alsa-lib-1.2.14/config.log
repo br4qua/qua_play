@@ -27,20 +27,28 @@ uname -v = #1 SMP Fri, 30 Jan 2026 16:02:53 +0000
 /usr/bin/oslevel       = unknown
 /bin/universe          = unknown
 
-PATH: /home/free2/.cabal/bin/
-PATH: /home/free2/.ghcup/bin/
-PATH: /home/free2/code/scripts-current/
+PATH: /home/free2/.local/busybox-bin/
 PATH: /home/free2/code/musl2gcc/scripts/
 PATH: /home/free2/code/launchers/
+PATH: /home/free2/code/scripts-current/
 PATH: /home/free2/.local/bin/
-PATH: /usr/local/sbin/
+PATH: /home/free2/.local/busybox-bin/
+PATH: /home/free2/code/musl2gcc/scripts/
+PATH: /home/free2/code/launchers/
+PATH: /home/free2/code/scripts-current/
+PATH: /home/free2/.local/bin/
+PATH: /home/free2/.cabal/bin/
+PATH: /home/free2/.ghcup/bin/
 PATH: /usr/local/bin/
 PATH: /usr/bin/
+PATH: /bin/
+PATH: /usr/local/sbin/
 PATH: /var/lib/flatpak/exports/bin/
 PATH: /usr/lib/jvm/default/bin/
 PATH: /usr/bin/site_perl/
 PATH: /usr/bin/vendor_perl/
 PATH: /usr/bin/core_perl/
+PATH: /opt/rocm/bin/
 PATH: /usr/lib/rustup/bin/
 PATH: /home/free2/.local/share/pnpm/
 
@@ -505,7 +513,7 @@ configure:13658: checking how to hardcode library paths into programs
 configure:13683: result: immediate
 configure:13794: checking for shl_load
 configure:13794: musl-gcc -o conftest -march=native -mtune=native -O3 -flto=auto  -static -flto=auto conftest.c  >&5
-/usr/bin/ld: /tmp/ccnaOlqP.ltrans0.ltrans.o: in function `main':
+/usr/bin/ld: /tmp/ccoaJxV1.ltrans0.ltrans.o: in function `main':
 <artificial>:(.text.startup+0x5): undefined reference to `shl_load'
 collect2: error: ld returned 1 exit status
 configure:13794: $? = 1

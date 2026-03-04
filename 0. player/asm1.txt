@@ -1,0 +1,60 @@
+  401570:	0f 1f 84 00 bb bb bb 	nopl   0xbbbbbb(%rax,%rax,1)
+  401577:	00 
+  401578:	0f 1f 84 00 00 00 00 	nopl   0x0(%rax,%rax,1)
+  40157f:	00 
+  401580:	b8 07 00 00 00       	mov    $0x7,%eax
+  401585:	48 8d 7c 24 40       	lea    0x40(%rsp),%rdi
+  40158a:	be 01 00 00 00       	mov    $0x1,%esi
+  40158f:	48 c7 c2 ff ff ff ff 	mov    $0xffffffffffffffff,%rdx
+  401596:	0f 05                	syscall
+  401598:	4c 89 e7             	mov    %r12,%rdi
+  40159b:	48 89 de             	mov    %rbx,%rsi
+  40159e:	48 c7 c2 00 04 00 00 	mov    $0x400,%rdx
+  4015a5:	48 01 d2             	add    %rdx,%rdx
+  4015a8:	66 90                	xchg   %ax,%ax
+  4015aa:	66 66 2e 0f 1f 84 00 	data16 cs nopw 0x0(%rax,%rax,1)
+  4015b1:	00 00 00 00 
+  4015b5:	66 66 2e 0f 1f 84 00 	data16 cs nopw 0x0(%rax,%rax,1)
+  4015bc:	00 00 00 00 
+  4015c0:	c4 e2 7d 2a 06       	vmovntdqa (%rsi),%ymm0
+  4015c5:	c4 e2 7d 2a 4e 20    	vmovntdqa 0x20(%rsi),%ymm1
+  4015cb:	c4 e2 7d 2a 56 40    	vmovntdqa 0x40(%rsi),%ymm2
+  4015d1:	c4 e2 7d 2a 5e 60    	vmovntdqa 0x60(%rsi),%ymm3
+  4015d7:	c4 e2 7d 2a a6 80 00 	vmovntdqa 0x80(%rsi),%ymm4
+  4015de:	00 00 
+  4015e0:	c4 e2 7d 2a ae a0 00 	vmovntdqa 0xa0(%rsi),%ymm5
+  4015e7:	00 00 
+  4015e9:	c4 e2 7d 2a b6 c0 00 	vmovntdqa 0xc0(%rsi),%ymm6
+  4015f0:	00 00 
+  4015f2:	c4 e2 7d 2a be e0 00 	vmovntdqa 0xe0(%rsi),%ymm7
+  4015f9:	00 00 
+  4015fb:	c5 fd e7 07          	vmovntdq %ymm0,(%rdi)
+  4015ff:	c5 fd e7 4f 20       	vmovntdq %ymm1,0x20(%rdi)
+  401604:	c5 fd e7 57 40       	vmovntdq %ymm2,0x40(%rdi)
+  401609:	c5 fd e7 5f 60       	vmovntdq %ymm3,0x60(%rdi)
+  40160e:	c5 fd e7 a7 80 00 00 	vmovntdq %ymm4,0x80(%rdi)
+  401615:	00 
+  401616:	c5 fd e7 af a0 00 00 	vmovntdq %ymm5,0xa0(%rdi)
+  40161d:	00 
+  40161e:	c5 fd e7 b7 c0 00 00 	vmovntdq %ymm6,0xc0(%rdi)
+  401625:	00 
+  401626:	c5 fd e7 bf e0 00 00 	vmovntdq %ymm7,0xe0(%rdi)
+  40162d:	00 
+  40162e:	48 81 c6 00 01 00 00 	add    $0x100,%rsi
+  401635:	48 81 c7 00 01 00 00 	add    $0x100,%rdi
+  40163c:	48 ff ca             	dec    %rdx
+  40163f:	0f 85 7b ff ff ff    	jne    0x4015c0
+  401645:	49 8b 0a             	mov    (%r10),%rcx
+  401648:	b8 10 00 00 00       	mov    $0x10,%eax
+  40164d:	4c 89 ff             	mov    %r15,%rdi
+  401650:	be 23 41 88 c0       	mov    $0xc0884123,%esi
+  401655:	4c 89 c2             	mov    %r8,%rdx
+  401658:	48 81 c1 00 00 01 00 	add    $0x10000,%rcx
+  40165f:	49 89 0a             	mov    %rcx,(%r10)
+  401662:	41 c7 00 04 00 00 00 	movl   $0x4,(%r8)
+  401669:	0f 05                	syscall
+  40166b:	48 81 c3 00 00 08 00 	add    $0x80000,%rbx
+  401672:	4d 31 ec             	xor    %r13,%r12
+  401675:	49 39 d9             	cmp    %rbx,%r9
+  401678:	0f 85 02 ff ff ff    	jne    0x401580
+  40167e:	0f 1f 84 00 ee ee ee 	nopl   0xeeeeee(%rax,%rax,1)

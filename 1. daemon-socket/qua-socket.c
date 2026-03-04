@@ -546,6 +546,9 @@ static void handle_command(int server_fd, int client_fd) {
         if (last_played[0]) {
             write(client_fd, last_played, strlen(last_played));
         }
+    } else if (strcmp(action, "last") == 0) {
+        if (last_played[0])
+            dprintf(client_fd, "%s\n", last_played);
     }
 }
 

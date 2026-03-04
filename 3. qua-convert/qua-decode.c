@@ -88,7 +88,7 @@ void *convert_audio(void *arg) {
   case 'f': // .flac
     if (strcmp(ext, "flac") == 0) {
       if ((pid = vfork()) == 0) {
-        execlp("flac", "flac", "-d", "--decode-through-errors", "-f", params->input_path, "-o", output_file, NULL);
+        execlp("flac", "flac", "-d", "-s", "--decode-through-errors", "-f", params->input_path, "-o", output_file, NULL);
         _exit(1);
       }
       break;
@@ -98,7 +98,7 @@ void *convert_audio(void *arg) {
   case 'w': // .wv or .wav
     if (strcmp(ext, "wv") == 0) {
       if ((pid = vfork()) == 0) {
-        execlp("wvunpack", "wvunpack", "-y", params->input_path, "-o", output_file, NULL);
+        execlp("wvunpack", "wvunpack", "-q", "-y", params->input_path, "-o", output_file, NULL);
         _exit(1);
       }
       break;
@@ -134,7 +134,7 @@ void *convert_audio(void *arg) {
   case 'm': // .mp3 or .m4a
     if (strcmp(ext, "mp3") == 0) {
       if ((pid = vfork()) == 0) {
-        execlp("mpg123", "mpg123", "-w", output_file, params->input_path, NULL);
+        execlp("mpg123", "mpg123", "-q", "-w", output_file, params->input_path, NULL);
         _exit(1);
       }
       break;
@@ -152,14 +152,14 @@ void *convert_audio(void *arg) {
   case 'o': // .opus or .ogg
     if (strcmp(ext, "opus") == 0) {
       if ((pid = vfork()) == 0) {
-        execlp("opusdec", "opusdec", "--force-wav", params->input_path, output_file, NULL);
+        execlp("opusdec", "opusdec", "--quiet", "--force-wav", params->input_path, output_file, NULL);
         _exit(1);
       }
       break;
     }
     if (strcmp(ext, "ogg") == 0) {
       if ((pid = vfork()) == 0) {
-        execlp("oggdec", "oggdec", params->input_path, "-o", output_file, NULL);
+        execlp("oggdec", "oggdec", "-Q", params->input_path, "-o", output_file, NULL);
         _exit(1);
       }
       break;

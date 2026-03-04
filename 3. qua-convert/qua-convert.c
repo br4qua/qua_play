@@ -1,7 +1,9 @@
 // qua-convert: Single responsibility - decode audio file to WAV
-// Usage: qua-convert <input-file> <output-wav-path>
+// Usage: qua-convert <input-file> [output-wav-path]
+// If no output path given, writes <basename>.wav in CWD.
 // Exit codes: 0 = success, 1 = error
 
+#include <libgen.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -17,14 +19,28 @@
 
 
 int main(int argc, char *argv[]) {
-  // Require both input and output paths
-  if (argc < 3) {
-    fprintf(stderr, "Usage: %s <input-audio-file> <output-wav-path>\n", argv[0]);
+  if (argc < 2) {
+    fprintf(stderr, "Usage: %s <input-audio-file> [output-wav-path]\n", argv[0]);
     return 1;
   }
 
   char input_file[PATH_MAX] = {0};
-  const char *output_file = argv[2];
+  char default_output[PATH_MAX] = {0};
+  const char *output_file;
+
+  if (argc >= 3) {
+    output_file = argv[2];
+  } else {
+    // Derive output from input basename: foo.flac -> foo.wav in CWD
+    char tmp[PATH_MAX];
+    strncpy(tmp, argv[1], sizeof(tmp) - 1);
+    char *base = basename(tmp);
+    char *dot = strrchr(base, '.');
+    if (dot)
+      *dot = '\0';
+    snprintf(default_output, sizeof(default_output), "%s.wav", base);
+    output_file = default_output;
+  }
 
   // Resolve input path
   if (realpath(argv[1], input_file) == NULL) {

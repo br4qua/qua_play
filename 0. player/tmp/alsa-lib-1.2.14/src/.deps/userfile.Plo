@@ -1,0 +1,26 @@
+userfile.lo: userfile.c ../include/config.h \
+ /usr/lib/musl/include/string.h /usr/lib/musl/include/features.h \
+ /usr/lib/musl/include/bits/alltypes.h /usr/lib/musl/include/strings.h \
+ /usr/lib/musl/include/errno.h /usr/lib/musl/include/bits/errno.h \
+ /usr/lib/musl/include/assert.h /usr/lib/musl/include/sys/types.h \
+ /usr/lib/musl/include/endian.h /usr/lib/musl/include/sys/select.h \
+ /usr/lib/musl/include/unistd.h /usr/lib/musl/include/bits/posix.h \
+ /usr/lib/musl/include/pwd.h /usr/lib/musl/include/stdio.h \
+ /usr/lib/musl/include/stdlib.h /usr/lib/musl/include/alloca.h
+../include/config.h:
+/usr/lib/musl/include/string.h:
+/usr/lib/musl/include/features.h:
+/usr/lib/musl/include/bits/alltypes.h:
+/usr/lib/musl/include/strings.h:
+/usr/lib/musl/include/errno.h:
+/usr/lib/musl/include/bits/errno.h:
+/usr/lib/musl/include/assert.h:
+/usr/lib/musl/include/sys/types.h:
+/usr/lib/musl/include/endian.h:
+/usr/lib/musl/include/sys/select.h:
+/usr/lib/musl/include/unistd.h:
+/usr/lib/musl/include/bits/posix.h:
+/usr/lib/musl/include/pwd.h:
+/usr/lib/musl/include/stdio.h:
+/usr/lib/musl/include/stdlib.h:
+/usr/lib/musl/include/alloca.h:

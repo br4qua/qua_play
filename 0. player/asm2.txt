@@ -1,0 +1,67 @@
+  401552:	0f 1f 84 00 bb bb bb 	nopl   0xbbbbbb(%rax,%rax,1)
+  401559:	00 
+  40155a:	4c 63 54 24 2c       	movslq 0x2c(%rsp),%r10
+  40155f:	c4 41 f9 6e c6       	vmovq  %r14,%xmm8
+  401564:	48 81 c3 00 00 18 00 	add    $0x180000,%rbx
+  40156b:	4d 89 ce             	mov    %r9,%r14
+  40156e:	49 89 c9             	mov    %rcx,%r9
+  401571:	0f 1f 40 00          	nopl   0x0(%rax)
+  401575:	66 66 2e 0f 1f 84 00 	data16 cs nopw 0x0(%rax,%rax,1)
+  40157c:	00 00 00 00 
+  401580:	b8 07 00 00 00       	mov    $0x7,%eax
+  401585:	48 8d 7c 24 60       	lea    0x60(%rsp),%rdi
+  40158a:	be 01 00 00 00       	mov    $0x1,%esi
+  40158f:	48 c7 c2 ff ff ff ff 	mov    $0xffffffffffffffff,%rdx
+  401596:	0f 05                	syscall
+  401598:	4d 89 e0             	mov    %r12,%r8
+  40159b:	4d 89 eb             	mov    %r13,%r11
+  40159e:	90                   	nop
+  40159f:	66 66 2e 0f 1f 84 00 	data16 cs nopw 0x0(%rax,%rax,1)
+  4015a6:	00 00 00 00 
+  4015aa:	66 66 2e 0f 1f 84 00 	data16 cs nopw 0x0(%rax,%rax,1)
+  4015b1:	00 00 00 00 
+  4015b5:	66 66 2e 0f 1f 84 00 	data16 cs nopw 0x0(%rax,%rax,1)
+  4015bc:	00 00 00 00 
+  4015c0:	c4 c2 7d 2a 38       	vmovntdqa (%r8),%ymm7
+  4015c5:	c4 c2 7d 2a 70 20    	vmovntdqa 0x20(%r8),%ymm6
+  4015cb:	49 81 c0 00 01 00 00 	add    $0x100,%r8
+  4015d2:	49 81 c3 00 01 00 00 	add    $0x100,%r11
+  4015d9:	c4 c2 7d 2a a8 40 ff 	vmovntdqa -0xc0(%r8),%ymm5
+  4015e0:	ff ff 
+  4015e2:	c4 c2 7d 2a a0 60 ff 	vmovntdqa -0xa0(%r8),%ymm4
+  4015e9:	ff ff 
+  4015eb:	c4 c2 7d 2a 58 80    	vmovntdqa -0x80(%r8),%ymm3
+  4015f1:	c4 c2 7d 2a 50 a0    	vmovntdqa -0x60(%r8),%ymm2
+  4015f7:	c4 c2 7d 2a 48 c0    	vmovntdqa -0x40(%r8),%ymm1
+  4015fd:	c4 c2 7d 2a 40 e0    	vmovntdqa -0x20(%r8),%ymm0
+  401603:	c4 c1 7d e7 bb 00 ff 	vmovntdq %ymm7,-0x100(%r11)
+  40160a:	ff ff 
+  40160c:	c4 c1 7d e7 b3 20 ff 	vmovntdq %ymm6,-0xe0(%r11)
+  401613:	ff ff 
+  401615:	c4 c1 7d e7 ab 40 ff 	vmovntdq %ymm5,-0xc0(%r11)
+  40161c:	ff ff 
+  40161e:	c4 c1 7d e7 a3 60 ff 	vmovntdq %ymm4,-0xa0(%r11)
+  401625:	ff ff 
+  401627:	c4 c1 7d e7 5b 80    	vmovntdq %ymm3,-0x80(%r11)
+  40162d:	c4 c1 7d e7 53 a0    	vmovntdq %ymm2,-0x60(%r11)
+  401633:	c4 c1 7d e7 4b c0    	vmovntdq %ymm1,-0x40(%r11)
+  401639:	c4 c1 7d e7 43 e0    	vmovntdq %ymm0,-0x20(%r11)
+  40163f:	49 39 d8             	cmp    %rbx,%r8
+  401642:	0f 85 78 ff ff ff    	jne    0x4015c0
+  401648:	0f ae f8             	sfence
+  40164b:	49 8b 1e             	mov    (%r14),%rbx
+  40164e:	b8 10 00 00 00       	mov    $0x10,%eax
+  401653:	4c 89 d7             	mov    %r10,%rdi
+  401656:	be 23 41 88 c0       	mov    $0xc0884123,%esi
+  40165b:	4c 89 fa             	mov    %r15,%rdx
+  40165e:	48 81 c3 00 00 01 00 	add    $0x10000,%rbx
+  401665:	49 89 1e             	mov    %rbx,(%r14)
+  401668:	41 c7 07 04 00 00 00 	movl   $0x4,(%r15)
+  40166f:	0f 05                	syscall
+  401671:	49 81 c4 00 00 08 00 	add    $0x80000,%r12
+  401678:	4d 31 cd             	xor    %r9,%r13
+  40167b:	49 8d 98 00 00 08 00 	lea    0x80000(%r8),%rbx
+  401682:	4c 39 64 24 38       	cmp    %r12,0x38(%rsp)
+  401687:	0f 85 e4 fe ff ff    	jne    0x401571
+  40168d:	c4 41 f9 7e c5       	vmovq  %xmm8,%r13
+  401692:	0f 1f 84 00 ee ee ee 	nopl   0xeeeeee(%rax,%rax,1)

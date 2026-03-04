@@ -1,0 +1,12 @@
+#!/bin/bash
+for card in /proc/asound/card*/pcm*p/info; do
+    if [ -f "$card" ]; then
+        c=$(grep "^card:" "$card" | awk '{print $2}')
+        d=$(grep "^device:" "$card" | awk '{print $2}')
+        cardname=$(cat /proc/asound/card$c/id)
+        name=$(grep "^name:" "$card" | cut -d: -f2- | sed 's/^ //')
+        echo "hw:$c,$d - $cardname ($name)"
+    fi
+done
+
+echo "!!!ONLY TYPE IN    hw:0,1    NOT THE WHOLE OUPUT!!!"

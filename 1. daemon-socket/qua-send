@@ -41,7 +41,7 @@ case "$ACTION" in
         echo -ne 'play-next\0' | socat - UNIX-CONNECT:/tmp/qua-socket.sock
         ;;
     prev)
-        echo -ne 'play-next\0' | socat - UNIX-CONNECT:/tmp/qua-socket.sock
+        echo -ne 'play-prev\0' | socat - UNIX-CONNECT:/tmp/qua-socket.sock
         ;;
     play)
         {

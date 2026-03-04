@@ -1,0 +1,33 @@
+shmarea.lo: shmarea.c ../include/config.h /usr/lib/musl/include/stdio.h \
+ /usr/lib/musl/include/features.h /usr/lib/musl/include/bits/alltypes.h \
+ /usr/lib/musl/include/stdlib.h /usr/lib/musl/include/alloca.h \
+ /usr/lib/musl/include/malloc.h /usr/lib/musl/include/string.h \
+ /usr/lib/musl/include/strings.h /usr/lib/musl/include/errno.h \
+ /usr/lib/musl/include/bits/errno.h /usr/lib/musl/include/poll.h \
+ /usr/lib/musl/include/bits/poll.h /usr/lib/musl/include/sys/mman.h \
+ /usr/lib/musl/include/bits/mman.h /usr/lib/musl/include/sys/shm.h \
+ /usr/lib/musl/include/sys/ipc.h /usr/lib/musl/include/bits/ipc.h \
+ /usr/lib/musl/include/bits/ipcstat.h /usr/lib/musl/include/bits/shm.h \
+ ../include/list.h /usr/lib/musl/include/stddef.h
+../include/config.h:
+/usr/lib/musl/include/stdio.h:
+/usr/lib/musl/include/features.h:
+/usr/lib/musl/include/bits/alltypes.h:
+/usr/lib/musl/include/stdlib.h:
+/usr/lib/musl/include/alloca.h:
+/usr/lib/musl/include/malloc.h:
+/usr/lib/musl/include/string.h:
+/usr/lib/musl/include/strings.h:
+/usr/lib/musl/include/errno.h:
+/usr/lib/musl/include/bits/errno.h:
+/usr/lib/musl/include/poll.h:
+/usr/lib/musl/include/bits/poll.h:
+/usr/lib/musl/include/sys/mman.h:
+/usr/lib/musl/include/bits/mman.h:
+/usr/lib/musl/include/sys/shm.h:
+/usr/lib/musl/include/sys/ipc.h:
+/usr/lib/musl/include/bits/ipc.h:
+/usr/lib/musl/include/bits/ipcstat.h:
+/usr/lib/musl/include/bits/shm.h:
+../include/list.h:
+/usr/lib/musl/include/stddef.h:

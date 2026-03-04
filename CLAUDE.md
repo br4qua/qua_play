@@ -29,6 +29,7 @@ Follows Unix philosophy: small, focused components communicating via sockets/pip
 
 ## Workflow
 
+- **Default to CWD.** Always resolve file paths relative to the current working directory first. Never guess paths in other directories when the file is likely in the CWD.
 - **Explain before reading.** Before requesting to read any file, state why you need it.
   e.g. "I need to read qua-socket.c to understand the current accept loop before adding timeout logic."
 - **Never co-author.** Do not add Co-Authored-By lines to commits.
@@ -57,6 +58,7 @@ This is a performance-critical audio project. Design decisions should consider:
 - **Compiler intrinsics** are encouraged for performance-critical code.
 - **Never auto-generate assembly** - developer writes asm by hand when needed.
 - **Trust LTO + PGO** for general optimization; focus manual effort on hot loops.
+- **Never dismiss optimizations** because "the syscall/IO dominates." Every cycle matters. Syscall cost is not an excuse to leave surrounding code unoptimized.
 
 ## Error Handling
 

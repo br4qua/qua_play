@@ -1,0 +1,35 @@
+1. when making the database or during UI display, track should be zero padded, which ever is faster UI, i think padding on the tui on load is better, and if its above 100, it should retroactively pad zeros for that album only
+
+2. allow the database to be expanded that is, we call it with -a or add or whatever you think its good, and it should add entries to the database
+
+4. when adding, we skip if mtime and innode matches, consider performance optimizationn here maybe this is really just one column
+
+5. leave a blank field of audiomd5, users can run a script to load a value into this field, which can be used to deduplicate later. deduplicate logic NOT implementated for now
+
+6. idea - we also need to update files whos meta has changed? maybe we need to check if innode is the same, but mtime has changed? this might require mtime and innode to be split into two different fields? 
+
+7. idea - it should remove entries that no longer exsist on disk. i am not sure the most efficent way to do this is
+
+8. we need to stay fast and still have the right level of abstraction. we also want to prevent double scanning of the database
+
+9. given these constraints, when we add to the database, we first have to check innode , if we have a hit in our memeory (because the old database is loaded while we are adding)
+
+10. some attention needs to be given to different paritions since the innode method would be technically incorrect. let me know what you think about this. let assume people will not be reordering their disk if that is a piece of relevant information.
+
+11. do not assume people will not rename their file or move them around the disk, they might just be moving files around or renaming them.
+
+12. consider hashmapping for speedup when we are initally checking for if an entry has already exsisted on the disk
+13. consider batching some operations when we are writing into the database, not necessary if all can be help in memeory and just wrote once
+14. consider users have at least 250Mbps read and write some data
+15. we will efficently use the kernel to get the mtime and innode , or do it ourselves, which ever is faster
+16. we should reduce code jump for icache purposes.
+17. we structures that align well with cache lines.
+18. database building should be fast. database adding should also be fast. file tag reading should be fast too. all must be robust.
+19. i think the remove empty should be dont with a -c key, but if called with -a, then there is duplicate work. since -a will make you see entires that exsist, if thats the case, those innodes do not need to be check not exsist, but we still need to check if its updated.
+20. fundamentally i think we can thread this because of multiple core paralleism? is there some general concern about sqlite threading and lock state or maybe thsoe have higher overall cost?
+21. recommend implementation steps, as in this is ALOT to do in 1 step. recommend if somehow rust would be better. we do not want to implement one of these and find out we have to refactor the whole thing.
+22. let focus on flac and wavpack and mp3 for now but like they all need to be prased seperately. a big directory scan might be slow, consider we might be able to start parsing them as each file comes in? or is this not recommend , soundboard with me the control flow logic. 
+23. avoid unceesary malloc
+24. address all concern first. then we plan, then we impelement
+
+

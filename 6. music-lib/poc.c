@@ -19,7 +19,16 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/wait.h>
+#include <pthread.h>
 #include <sqlite3.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize2.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 /* ------------------------------------------------------------------ */
 /* Shared types                                                        */
@@ -453,7 +462,8 @@ static const char *SCHEMA =
 	"  disc_num     INTEGER,"
 	"  date         TEXT,"
 	"  genre        TEXT,"
-	"  audiomd5     TEXT"
+	"  audiomd5     TEXT,"
+	"  cover        TEXT DEFAULT ''"
 	");"
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_dev_ino ON tracks(dev, ino);";
 
@@ -469,7 +479,16 @@ static void db_migrate(sqlite3 *db)
 		"SELECT dev FROM tracks LIMIT 0;", -1, &probe, NULL);
 	if (rc == SQLITE_OK) {
 		sqlite3_finalize(probe);
-		return; /* new schema already in place */
+		/* add cover column if missing */
+		rc = sqlite3_prepare_v2(db,
+			"SELECT cover FROM tracks LIMIT 0;", -1, &probe, NULL);
+		if (rc == SQLITE_OK)
+			sqlite3_finalize(probe);
+		else
+			sqlite3_exec(db,
+				"ALTER TABLE tracks ADD COLUMN cover TEXT DEFAULT '';",
+				NULL, NULL, NULL);
+		return;
 	}
 
 	/* Check if table exists at all */
@@ -645,6 +664,8 @@ typedef struct {
 	uint32_t moved;
 } scan_stats_t;
 
+static int g_debug;
+
 static void scan_dir(sqlite3 *db, hmap_t *m, const char *dirpath,
                       scan_stats_t *stats)
 {
@@ -696,6 +717,9 @@ static void scan_dir(sqlite3 *db, hmap_t *m, const char *dirpath,
 			if (slot->mtime == mtime) {
 				/* Same content — check if path changed */
 				if (slot->path && strcmp(slot->path, path) != 0) {
+					if (g_debug)
+						printf("  [moved] %s -> %s\n",
+						       slot->path, path);
 					db_update_path(slot->rowid, path);
 					stats->moved++;
 				} else {
@@ -706,6 +730,8 @@ static void scan_dir(sqlite3 *db, hmap_t *m, const char *dirpath,
 			/* mtime changed — re-parse */
 			stats->updated++;
 		} else {
+			if (g_debug)
+				printf("  [added] %s\n", path);
 			stats->added++;
 		}
 
@@ -713,6 +739,8 @@ static void scan_dir(sqlite3 *db, hmap_t *m, const char *dirpath,
 		stream_info_t si = {0};
 		tags_t tags = {0};
 		if (parse_file(path, fmt, &si, &tags) != 0) {
+			if (g_debug)
+				printf("  [error] %s\n", path);
 			stats->errors++;
 			continue;
 		}
@@ -780,6 +808,7 @@ static void usage(const char *prog)
 		"  %s <dir> [db]      scan and index directory\n"
 		"  %s -a <dir> [db]   add/update entries (same as above)\n"
 		"  %s -c [db]         remove stale entries (files deleted from disk)\n"
+		"  %s -i [db]         build cover art PNG cache\n"
 		"  %s -h              show this help\n"
 		"\n"
 		"Scan mode (default):\n"
@@ -800,12 +829,359 @@ static void usage(const char *prog)
 		"  %s /mnt/music\n"
 		"  %s -a /mnt/more-music library.db\n"
 		"  %s -c library.db\n",
-		prog, prog, prog, prog, prog, prog, prog);
+		prog, prog, prog, prog, prog, prog, prog, prog);
+}
+
+/* ------------------------------------------------------------------ */
+/* Cover art cache builder                                             */
+/* ------------------------------------------------------------------ */
+
+static int is_image_ext(const char *name)
+{
+	int len = strlen(name);
+	/* skip spectrogram files (*.spec.png) */
+	if (len > 9 && strcasecmp(name + len - 9, ".spec.png") == 0)
+		return 0;
+	const char *dot = strrchr(name, '.');
+	if (!dot) return 0;
+	if (strcasecmp(dot, ".jpg") == 0 || strcasecmp(dot, ".jpeg") == 0 ||
+	    strcasecmp(dot, ".png") == 0 || strcasecmp(dot, ".webp") == 0 ||
+	    strcasecmp(dot, ".bmp") == 0)
+		return 1;
+	return 0;
+}
+
+static int is_cover_image(const char *name)
+{
+	if (!is_image_ext(name)) return 0;
+	char lo = name[0] | 32;
+	return lo == 'c' || lo == 'f';
+}
+
+/* find best cover in dir: prefer cover/front named, fall back to biggest
+ * image, then check one subdirectory level deep. */
+static int find_cover(const char *d, char *out, int outmax)
+{
+	DIR *dp = opendir(d);
+	if (!dp) return 0;
+
+	struct dirent *ep;
+	char best_named[4096] = "";
+	off_t best_named_sz = 0;
+	char best_any[4096] = "";
+	off_t best_any_sz = 0;
+	char subdirs[64][256];
+	int nsub = 0;
+
+	while ((ep = readdir(dp))) {
+		if (ep->d_name[0] == '.') continue;
+		if (ep->d_type == DT_DIR && nsub < 64) {
+			strncpy(subdirs[nsub], ep->d_name,
+				sizeof(subdirs[0]) - 1);
+			subdirs[nsub][sizeof(subdirs[0]) - 1] = '\0';
+			nsub++;
+			continue;
+		}
+		if (ep->d_type != DT_REG) continue;
+		if (!is_image_ext(ep->d_name)) continue;
+
+		char full[4096];
+		snprintf(full, sizeof(full), "%s/%s", d, ep->d_name);
+		struct stat ist;
+		if (stat(full, &ist) != 0) continue;
+
+		if (is_cover_image(ep->d_name) &&
+		    ist.st_size > best_named_sz) {
+			best_named_sz = ist.st_size;
+			strncpy(best_named, full, sizeof(best_named) - 1);
+		}
+		if (ist.st_size > best_any_sz) {
+			best_any_sz = ist.st_size;
+			strncpy(best_any, full, sizeof(best_any) - 1);
+		}
+	}
+	closedir(dp);
+
+	/* prefer named cover/front, then biggest image */
+	if (*best_named) {
+		strncpy(out, best_named, outmax - 1);
+		out[outmax - 1] = '\0';
+		return 1;
+	}
+	if (*best_any) {
+		strncpy(out, best_any, outmax - 1);
+		out[outmax - 1] = '\0';
+		return 1;
+	}
+
+	/* check one subdirectory level */
+	for (int i = 0; i < nsub; i++) {
+		char subpath[4096];
+		snprintf(subpath, sizeof(subpath), "%s/%s", d, subdirs[i]);
+		dp = opendir(subpath);
+		if (!dp) continue;
+		while ((ep = readdir(dp))) {
+			if (ep->d_name[0] == '.') continue;
+			if (ep->d_type != DT_REG) continue;
+			if (!is_image_ext(ep->d_name)) continue;
+
+			char full[4096];
+			snprintf(full, sizeof(full), "%s/%s",
+				 subpath, ep->d_name);
+			struct stat ist;
+			if (stat(full, &ist) != 0) continue;
+
+			if (is_cover_image(ep->d_name) &&
+			    ist.st_size > best_named_sz) {
+				best_named_sz = ist.st_size;
+				strncpy(best_named, full,
+					sizeof(best_named) - 1);
+			}
+			if (ist.st_size > best_any_sz) {
+				best_any_sz = ist.st_size;
+				strncpy(best_any, full,
+					sizeof(best_any) - 1);
+			}
+		}
+		closedir(dp);
+	}
+
+	if (*best_named) {
+		strncpy(out, best_named, outmax - 1);
+		out[outmax - 1] = '\0';
+		return 1;
+	}
+	if (*best_any) {
+		strncpy(out, best_any, outmax - 1);
+		out[outmax - 1] = '\0';
+		return 1;
+	}
+	return 0;
+}
+
+static unsigned long hash_str(const char *s)
+{
+	unsigned long h = 5381;
+	while (*s) h = h * 33 + (unsigned char)*s++;
+	return h;
+}
+
+static int cache_cover(const char *src, const char *dst, int max_dim)
+{
+	int w, h, ch;
+	unsigned char *img = stbi_load(src, &w, &h, &ch, 3);
+	if (!img) {
+		/* stb_image can't decode (webp?) — fallback to magick */
+		pid_t pid = fork();
+		if (pid == 0) {
+			execlp("magick", "magick", src,
+			       "-resize", "1200x1200>", dst, NULL);
+			_exit(1);
+		}
+		int status;
+		waitpid(pid, &status, 0);
+		return (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+			? 0 : -1;
+	}
+
+	/* compute scaled dimensions */
+	int nw = w, nh = h;
+	if (w > max_dim || h > max_dim) {
+		double s = (double)max_dim / (w > h ? w : h);
+		nw = (int)(w * s);
+		nh = (int)(h * s);
+		if (nw < 1) nw = 1;
+		if (nh < 1) nh = 1;
+	}
+
+	unsigned char *out;
+	if (nw != w || nh != h) {
+		out = malloc(nw * nh * 3);
+		stbir_resize_uint8_linear(img, w, h, 0,
+					  out, nw, nh, 0, STBIR_RGB);
+		stbi_image_free(img);
+	} else {
+		out = img;
+	}
+
+	int ok = stbi_write_png(dst, nw, nh, 3, out, nw * 3);
+	free(out);
+	return ok ? 0 : -1;
+}
+
+/* ---- threaded cache_cover worker ---- */
+
+struct cache_job {
+	char src[4096];
+	char dst[4096];
+};
+
+static struct cache_job *g_jobs;
+static int               g_njobs;
+static _Atomic int       g_next_job;
+static _Atomic int       g_done;
+
+static void *cache_worker(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		int i = g_next_job++;
+		if (i >= g_njobs) break;
+		cache_cover(g_jobs[i].src, g_jobs[i].dst, 1200);
+		g_done++;
+	}
+	return NULL;
+}
+
+static void build_image_cache(sqlite3 *db, const char *home)
+{
+	char cache_dir[4096];
+	snprintf(cache_dir, sizeof(cache_dir),
+		 "%s/.cache/qua-music-tui", home);
+	mkdir(cache_dir, 0755);
+
+	sqlite3_stmt *dirs;
+	if (sqlite3_prepare_v2(db,
+		"SELECT DISTINCT"
+		" rtrim(rtrim(path, replace(path, '/', '')), '/')"
+		" FROM tracks;", -1, &dirs, NULL) != SQLITE_OK)
+		return;
+
+	sqlite3_exec(db,
+		"CREATE INDEX IF NOT EXISTS idx_path ON tracks(path);",
+		NULL, NULL, NULL);
+	sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL);
+
+	sqlite3_stmt *upd;
+	sqlite3_prepare_v2(db,
+		"UPDATE tracks SET cover=?"
+		" WHERE path >= ? || '/'"
+		" AND path < ? || '0';",  /* '0' is '/' + 1 in ASCII */
+		-1, &upd, NULL);
+
+	/* phase 1: scan dirs, set cover on tracks, collect jobs */
+	int cap = 4096;
+	g_jobs = malloc(cap * sizeof(*g_jobs));
+	g_njobs = 0;
+	int total = 0;
+
+	while (sqlite3_step(dirs) == SQLITE_ROW) {
+		const char *d = (const char *)sqlite3_column_text(dirs, 0);
+		if (!d || !*d) continue;
+		total++;
+
+		char cover[4096] = "";
+		if (!find_cover(d, cover, sizeof(cover))) {
+			/* no image file — extract embedded art from
+			 * first flac/wv into the album directory */
+			DIR *adp = opendir(d);
+			int extracted = 0;
+			if (adp) {
+				struct dirent *aep;
+				while ((aep = readdir(adp))) {
+					if (aep->d_type != DT_REG) continue;
+					const char *dot = strrchr(aep->d_name, '.');
+					if (!dot) continue;
+					int is_flac = strcasecmp(dot, ".flac") == 0;
+					int is_wv = strcasecmp(dot, ".wv") == 0;
+					if (!is_flac && !is_wv) continue;
+
+					char audio[4096], out[4096];
+					snprintf(audio, sizeof(audio),
+						 "%s/%s", d, aep->d_name);
+					snprintf(out, sizeof(out),
+						 "%s/cover.png", d);
+
+					pid_t pid = fork();
+					if (pid == 0) {
+						int nul = open("/dev/null", O_WRONLY);
+						if (nul >= 0) {
+							dup2(nul, STDERR_FILENO);
+							dup2(nul, STDOUT_FILENO);
+							close(nul);
+						}
+						if (is_flac) {
+							execlp("metaflac", "metaflac",
+							       "--export-picture-to",
+							       out, audio, NULL);
+						} else {
+							chdir(d);
+							execlp("wvtag", "wvtag",
+							       "-xx",
+							       "Cover Art (Front)=cover.%e",
+							       "-y", audio, NULL);
+						}
+						_exit(1);
+					}
+					int st;
+					waitpid(pid, &st, 0);
+					if (WIFEXITED(st) && WEXITSTATUS(st) == 0)
+						extracted = 1;
+					break; /* only try one file */
+				}
+				closedir(adp);
+				if (extracted)
+					find_cover(d, cover, sizeof(cover));
+			}
+		}
+
+		/* compute cache path, update all tracks in this dir */
+		char cpath[4096] = "";
+		if (*cover)
+			snprintf(cpath, sizeof(cpath), "%s/%016lx.png",
+				 cache_dir, hash_str(cover));
+
+		sqlite3_reset(upd);
+		sqlite3_bind_text(upd, 1, cpath, -1, SQLITE_STATIC);
+		sqlite3_bind_text(upd, 2, d, -1, SQLITE_STATIC);
+		sqlite3_bind_text(upd, 3, d, -1, SQLITE_STATIC);
+		sqlite3_step(upd);
+
+		/* queue cache job if PNG doesn't exist yet */
+		if (*cpath) {
+			struct stat cst;
+			if (stat(cpath, &cst) != 0) {
+				if (g_njobs >= cap) {
+					cap *= 2;
+					g_jobs = realloc(g_jobs,
+						cap * sizeof(*g_jobs));
+				}
+				strncpy(g_jobs[g_njobs].src, cover, 4095);
+				strncpy(g_jobs[g_njobs].dst, cpath, 4095);
+				g_njobs++;
+			}
+		}
+	}
+	sqlite3_finalize(dirs);
+	sqlite3_finalize(upd);
+	sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+
+	printf("Cover art: %d dirs, %d to cache\n", total, g_njobs);
+
+	/* phase 2: fan out cache_cover across threads */
+	if (g_njobs > 0) {
+		g_next_job = 0;
+		g_done = 0;
+		int nthreads = sysconf(_SC_NPROCESSORS_ONLN);
+		if (nthreads < 1) nthreads = 4;
+		if (nthreads > g_njobs) nthreads = g_njobs;
+		pthread_t *tids = malloc(nthreads * sizeof(*tids));
+
+		for (int i = 0; i < nthreads; i++)
+			pthread_create(&tids[i], NULL, cache_worker, NULL);
+		for (int i = 0; i < nthreads; i++)
+			pthread_join(tids[i], NULL);
+
+		free(tids);
+		printf("Cached %d images (%d threads)\n", g_njobs, nthreads);
+	}
+	free(g_jobs);
 }
 
 int main(int argc, char *argv[])
 {
 	int cleanup_mode = 0;
+	int imgcache_mode = 0;
 	const char *dir    = NULL;
 	static char dbpath_buf[4096];
 	const char *home = getenv("HOME");
@@ -823,7 +1199,15 @@ int main(int argc, char *argv[])
 		usage(argv[0]);
 		return 0;
 	}
-	if (argi < argc && strcmp(argv[argi], "-c") == 0) {
+	if (argi < argc && strcmp(argv[argi], "-d") == 0) {
+		g_debug = 1;
+		argi++;
+	}
+	if (argi < argc && strcmp(argv[argi], "-i") == 0) {
+		imgcache_mode = 1;
+		argi++;
+		if (argi < argc) dbpath = argv[argi++];
+	} else if (argi < argc && strcmp(argv[argi], "-c") == 0) {
 		cleanup_mode = 1;
 		argi++;
 		if (argi < argc) dbpath = argv[argi++];
@@ -833,6 +1217,10 @@ int main(int argc, char *argv[])
 		if (argi < argc) dir = argv[argi++];
 		if (argi < argc) dbpath = argv[argi++];
 		if (!dir) { usage(argv[0]); return 1; }
+		/* resolve to absolute path so DB never stores relative paths */
+		char resolved[PATH_MAX];
+		if (realpath(dir, resolved))
+			dir = resolved;
 	}
 
 	sqlite3 *db;
@@ -846,7 +1234,14 @@ int main(int argc, char *argv[])
 
 	if (db_init(db) != 0) return 1;
 
-	if (cleanup_mode) {
+	if (imgcache_mode) {
+		build_image_cache(db, home);
+		sqlite3_finalize(g_upsert_stmt);
+		sqlite3_finalize(g_update_path_stmt);
+		sqlite3_finalize(g_delete_stmt);
+		sqlite3_close(db);
+		return 0;
+	} else if (cleanup_mode) {
 		sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL);
 		cleanup_stale(db);
 		sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
@@ -873,6 +1268,19 @@ int main(int argc, char *argv[])
 
 		hmap_destroy(&m);
 	}
+
+	/* (re)build FTS5 trigram index for fast substring search */
+	printf("Building search index...\n");
+	sqlite3_exec(db,
+		"DROP TABLE IF EXISTS tracks_fts;"
+		"CREATE VIRTUAL TABLE tracks_fts USING fts5("
+		"  title, artist, album, album_artist, date, path,"
+		"  content=tracks, content_rowid=rowid,"
+		"  tokenize='trigram'"
+		");"
+		"INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild');",
+		NULL, NULL, NULL);
+	printf("Search index built.\n");
 
 	sqlite3_finalize(g_upsert_stmt);
 	sqlite3_finalize(g_update_path_stmt);

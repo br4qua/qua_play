@@ -1,0 +1,17 @@
+The shell version:                            
+                                                 
+  1. Shell parses the command                        
+  2. Forks for echo
+  3. Creates a pipe                                  
+  4. echo writes to pipe
+  5. Forks for socat
+  6. socat reads from pipe
+  7. socat opens socket, connects, writes
+  8. Two processes exit, shell reaps both
+
+  Your C version:
+
+  1. Opens socket, connects, writes, exits
+
+  One process, 3 syscalls, no pipes, no forks, no
+  parsing.

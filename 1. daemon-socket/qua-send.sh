@@ -1,0 +1,140 @@
+#!/bin/sh
+
+# NOTE: echo -ne might not work, if not use printf in place of it.
+show_help() {
+    cat <<'EOF'
+qua-send - control qua-player daemon
+
+Usage: qua-send <action> [files...]
+
+Actions:
+  play [file]     Play file, or resume last played
+  next            Play next track in directory
+  prev            Play previous track in directory
+  stop            Stop playback
+  info            Show current track info
+  status          Show playback state (PLAYING/STOPPED)
+  hist            Pick from history with fzf
+  hist-rofi       Pick from history with rofi
+  restart         Kill qua-socket, qua-player, qua-convert
+  cc              Clear cache (/dev/shm/raw-* and /dev/shm/qua-cache)
+
+Examples:
+  qua-send play song.flac
+  qua-send play *.wv
+  qua-send next
+  qua-send stop
+  qua-send history
+EOF
+}
+
+if [ -z "$1" ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    show_help
+    exit 0
+fi
+
+ACTION="$1"
+shift
+
+case "$ACTION" in
+    next)
+        echo -ne 'play-next\0' | socat - UNIX-CONNECT:/tmp/qua-socket.sock
+        ;;
+    prev)
+        echo -ne 'play-prev\0' | socat - UNIX-CONNECT:/tmp/qua-socket.sock
+        ;;
+    play)
+        {
+            echo -ne 'play\0'
+            for f in "$@"; do
+                # printf '%s\0' "$(realpath "$f")"
+                echo -ne "$(realpath "$f")\0"
+            done
+        } | socat - UNIX-CONNECT:/tmp/qua-socket.sock 2>/dev/null && exit 0
+
+        "$0" start
+
+        {
+            echo -ne 'play\0'
+            for f in "$@"; do
+                # printf '%s\0' "$(realpath "$f")"
+                echo -ne "$(realpath "$f")\0"
+            done
+        } | socat - UNIX-CONNECT:/tmp/qua-socket.sock
+        ;;
+    hist)
+        HISTORY_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/qua-player/history"
+        if [ ! -f "$HISTORY_FILE" ]; then
+            echo "No history file found" >&2
+            exit 1
+        fi
+        path=$(tac "$HISTORY_FILE" | awk '{ts=strftime("%Y-%m-%d %H:%M", $1); $1=""; p=$0; sub(/^ /,"",p); if(seen[p]++)next; bn=p; gsub(/.*\//,"",bn); print ts"\t"p"\t"bn}' | \
+               fzf --with-nth=1,3 --delimiter='\t' --nth=.. \
+                   --height=10 \
+                   --layout=reverse \
+                   --border=sharp \
+                   --info=inline \
+                   --no-bold | cut -f2)
+        if [ -n "$path" ]; then
+            printf '%s\0%s\0' "play" "$path" | socat - UNIX-CONNECT:/tmp/qua-socket.sock
+        fi
+        ;;
+    hist-rofi)
+        HISTORY_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/qua-player/history"
+        if [ ! -f "$HISTORY_FILE" ]; then
+            exit 1
+        fi
+        path=$(tac "$HISTORY_FILE" | awk '{ts=strftime("%Y-%m-%d %H:%M", $1); $1=""; p=$0; sub(/^ /,"",p); if(seen[p]++)next; bn=p; gsub(/.*\//,"",bn); print ts" "bn"\t"p}' | \
+               rofi -dmenu -i -p "History" -format 's' \
+                   -display-column-separator '\t' -display-columns 1 \
+                   -theme-str 'window {width: 25%;}' \
+                   -theme-str '* {font: "JetBrains Mono 12";}' | cut -f2)
+        if [ -n "$path" ]; then
+            printf '%s\0%s\0' "play" "$path" | socat - UNIX-CONNECT:/tmp/qua-socket.sock
+        fi
+        ;;
+    status)
+        printf '%s\0' "status" | socat - UNIX-CONNECT:/tmp/qua-socket.sock
+        ;;
+    info)
+        path=$(printf '%s\0' "$ACTION" | socat - UNIX-CONNECT:/tmp/qua-socket.sock)
+        echo "$path"
+        qua-info "$path"
+        ;;
+    start)
+        pgrep -x qua-socket >/dev/null && echo "already running" && exit 0
+        cd "$HOME" && setsid qua-socket >/dev/null 2>&1 &
+        inotifywait -e create -qq /tmp --include 'qua-socket.sock'
+        echo "($!) qua-socket"
+        ;;
+    kill)
+        pkill -9 qua-socket
+        pkill -9 qua-player
+        pkill -9 qua-convert
+        while pgrep -x qua-socket >/dev/null; do sleep 0.01; done
+        rm -f /tmp/qua-socket.sock /tmp/qua-socket-daemon.lock
+        echo "qua-socket killed"
+        ;;
+    restart)
+        pkill -9 qua-socket
+        pkill -9 qua-player
+        pkill -9 qua-convert
+        while pgrep -x qua-socket >/dev/null; do sleep 0.01; done
+        rm -f /tmp/qua-socket.sock /tmp/qua-socket-daemon.lock
+        cd "$HOME" && setsid qua-socket >/dev/null 2>&1 &
+        echo "($!) qua-socket"
+        ;;
+    cc)
+        rm -f /dev/shm/raw-*
+        rm -rf /dev/shm/qua-cache/*
+        echo "Cache cleared"
+        ;;
+    *)
+        {
+            printf '%s\0' "$ACTION"
+            for f in "$@"; do
+                printf '%s\0' "$(realpath "$f")"
+            done
+        } | socat - UNIX-CONNECT:/tmp/qua-socket.sock
+        ;;
+esac

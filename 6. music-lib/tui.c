@@ -20,7 +20,7 @@
 #include <sqlite3.h>
 #include <ncurses.h>
 
-#define DB_PATH       "/home/free2/code/musl2gcc/6. music-lib/music.db"
+#define DB_PATH_FMT   "%s/.config/qua-player/music.db"
 #define MAX_TRACKS    524288
 #define MAX_VIEW      (MAX_TRACKS * 2)  /* tracks + headers */
 #define QUERY_MAX     256
@@ -83,7 +83,7 @@ static col_def_t col_defs[] = {
 	{ "Dur",      "duration",        5,    0,      1,       0,    g_duration   },
 	{ "Fmt",      "format",          4,    0,      1,       1,    g_format     },
 	{ "Hz",       "sample_rate",     5,    0,      1,       0,    g_samplerate },
-	{ "Bt",       "bit_depth",       2,    0,      1,       0,    g_bitdepth   },
+	{ "Bd",       "bit_depth",       2,    0,      1,       0,    g_bitdepth   },
 	{ "Date",     "date",            10,   0,      0,       1,    g_date       },
 	{ "Genre",    "genre",           0,    1,      0,       1,    g_genre      },
 };
@@ -104,6 +104,7 @@ typedef struct {
 static view_row_t *view;
 static int         nview;
 static char        query_buf[QUERY_MAX] = "";
+static int         search_mode;    /* 0=normal, 1=typing search */
 static int         sort_col = 3;   /* default: sort by album */
 static int         sort_asc = 1;
 static sqlite3    *mem_db;
@@ -473,10 +474,12 @@ static void render(int top, int selected)
 	int ntracks_in_view = 0;
 	for (int i = 0; i < nview; i++)
 		if (view[i].type == VIEW_TRACK) ntracks_in_view++;
-	if (*query_buf)
-		mvprintw(LINES-1, 0, " > %s  [%d results]  ESC: clear", query_buf, ntracks_in_view);
+	if (search_mode)
+		mvprintw(LINES-1, 0, " / %s_  [%d results]", query_buf, ntracks_in_view);
+	else if (*query_buf)
+		mvprintw(LINES-1, 0, " [%s] %d results  |  /: search  ESC: clear", query_buf, ntracks_in_view);
 	else
-		mvprintw(LINES-1, 0, " > _   %d tracks  |  arrows/PgUp/PgDn  Enter: play  ESC: quit",
+		mvprintw(LINES-1, 0, " %d tracks  |  /: search  Enter: play  q: quit",
 		         ntracks_in_view);
 	clrtoeol();
 	attroff(A_REVERSE);
@@ -490,7 +493,11 @@ static void render(int top, int selected)
 
 int main(int argc, char *argv[])
 {
-	const char *dbpath = argc > 1 ? argv[1] : DB_PATH;
+	static char db_default[4096];
+	const char *home = getenv("HOME");
+	if (!home) { fprintf(stderr, "$HOME not set\n"); return 1; }
+	snprintf(db_default, sizeof(db_default), DB_PATH_FMT, home);
+	const char *dbpath = argc > 1 ? argv[1] : db_default;
 
 	mem_db = open_memdb(dbpath);
 	if (!mem_db) return 1;
@@ -507,7 +514,7 @@ int main(int argc, char *argv[])
 	keypad(stdscr, TRUE); curs_set(0);
 	start_color(); use_default_colors();
 	init_pair(1, COLOR_CYAN, -1);
-	mousemask(BUTTON1_CLICKED | BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
+	mousemask(BUTTON1_CLICKED | BUTTON3_CLICKED | BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
 	mouseinterval(0);
 
 	int top      = 0;
@@ -521,77 +528,111 @@ int main(int argc, char *argv[])
 		int prev = selected, old_top = top;
 		int dirty = 0;
 
-		switch (ch) {
-		case 27: /* ESC */
-			if (*query_buf) {
+		if (search_mode) {
+			/* search mode: keys go to query buffer */
+			switch (ch) {
+			case 27: /* ESC — cancel search */
+				search_mode = 0;
 				query_buf[0] = '\0';
 				rebuild_view();
 				selected = first_track();
 				top = 0;
 				dirty = 1;
-			} else {
-				goto quit;
-			}
-			break;
-		case KEY_ENTER: case '\n':
-			play_track(selected);
-			break;
-		case KEY_UP:    case 'k': selected = prev_track(selected); break;
-		case KEY_DOWN:  case 'j': selected = next_track(selected); break;
-		case KEY_PPAGE: case 'u': {
-			int i = selected;
-			for (int n = rows_h; n > 0; n--) i = prev_track(i);
-			selected = i; break;
-		}
-		case KEY_NPAGE: case 'd': {
-			int i = selected;
-			for (int n = rows_h; n > 0; n--) i = next_track(i);
-			selected = i; break;
-		}
-		case KEY_HOME: selected = first_track(); break;
-		case KEY_END:  selected = last_track();  break;
-		case KEY_RESIZE: rows_h = LINES - 2; dirty = 1; break;
-		case KEY_BACKSPACE: case 127: {
-			int len = strlen(query_buf);
-			if (len > 0) {
-				query_buf[len-1] = '\0';
-				rebuild_view();
-				selected = first_track(); top = 0;
+				break;
+			case KEY_ENTER: case '\n':
+				/* accept search, leave filter active */
+				search_mode = 0;
 				dirty = 1;
-			}
-			break;
-		}
-		case KEY_MOUSE: {
-			MEVENT ev;
-			if (getmouse(&ev) == OK) {
-				if (ev.bstate & BUTTON4_PRESSED)
-					selected = prev_track(selected);
-				else if (ev.bstate & BUTTON5_PRESSED)
-					selected = next_track(selected);
-				else if ((ev.bstate & BUTTON1_CLICKED) &&
-				         ev.y >= 1 && ev.y < LINES - 1) {
-					int idx = top + (ev.y - 1);
-					if (idx >= 0 && idx < nview && view[idx].type == VIEW_TRACK) {
-						if (idx == selected) play_track(selected);
-						else selected = idx;
-					}
-				}
-			}
-			break;
-		}
-		default:
-			/* fzf: any printable key appends to query_buf */
-			if (ch >= 32 && ch < 127) {
+				break;
+			case KEY_BACKSPACE: case 127: {
 				int len = strlen(query_buf);
-				if (len < QUERY_MAX - 1) {
-					query_buf[len]   = (char)ch;
-					query_buf[len+1] = '\0';
+				if (len > 0) {
+					query_buf[len-1] = '\0';
 					rebuild_view();
 					selected = first_track(); top = 0;
 					dirty = 1;
 				}
+				break;
 			}
-			break;
+			case KEY_RESIZE: rows_h = LINES - 2; dirty = 1; break;
+			default:
+				if (ch >= 32 && ch < 127) {
+					int len = strlen(query_buf);
+					if (len < QUERY_MAX - 1) {
+						query_buf[len]   = (char)ch;
+						query_buf[len+1] = '\0';
+						rebuild_view();
+						selected = first_track(); top = 0;
+						dirty = 1;
+					}
+				}
+				break;
+			}
+		} else {
+			/* normal mode */
+			switch (ch) {
+			case 27: /* ESC */
+				if (*query_buf) {
+					query_buf[0] = '\0';
+					rebuild_view();
+					selected = first_track();
+					top = 0;
+					dirty = 1;
+				} else {
+					goto quit;
+				}
+				break;
+			case '/':
+				search_mode = 1;
+				query_buf[0] = '\0';
+				rebuild_view();
+				selected = first_track();
+				top = 0;
+				dirty = 1;
+				break;
+			case KEY_ENTER: case '\n':
+				play_track(selected);
+				break;
+			case KEY_UP:    case 'k': selected = prev_track(selected); break;
+			case KEY_DOWN:  case 'j': selected = next_track(selected); break;
+			case KEY_PPAGE: case 'u': {
+				int i = selected;
+				for (int n = rows_h; n > 0; n--) i = prev_track(i);
+				selected = i; break;
+			}
+			case KEY_NPAGE: case 'd': {
+				int i = selected;
+				for (int n = rows_h; n > 0; n--) i = next_track(i);
+				selected = i; break;
+			}
+			case 'q': goto quit;
+			case KEY_HOME: selected = first_track(); break;
+			case KEY_END:  selected = last_track();  break;
+			case KEY_RESIZE: rows_h = LINES - 2; dirty = 1; break;
+			case KEY_MOUSE: {
+				MEVENT ev;
+				if (getmouse(&ev) == OK) {
+					if (ev.bstate & BUTTON4_PRESSED)
+						selected = prev_track(selected);
+					else if (ev.bstate & BUTTON5_PRESSED)
+						selected = next_track(selected);
+					else if (ev.y >= 1 && ev.y < LINES - 1) {
+						int idx = top + (ev.y - 1);
+						if (idx >= 0 && idx < nview &&
+						    view[idx].type == VIEW_TRACK) {
+							if (ev.bstate & BUTTON3_CLICKED) {
+								selected = idx;
+								play_track(selected);
+							} else if (ev.bstate & BUTTON1_CLICKED) {
+								selected = idx;
+							}
+						}
+					}
+				}
+				break;
+			}
+			default: break;
+			}
 		}
 
 		if (selected < top)

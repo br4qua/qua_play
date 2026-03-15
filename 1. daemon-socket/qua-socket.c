@@ -496,11 +496,16 @@ static void handle_command(int server_fd, int client_fd) {
         }
 
         if (path) {
-            spawn_play(path);
             state_is_playing = 1;
             if (path != last_played)
                 snprintf(last_played, sizeof(last_played), "%s", path);
-            dprintf(client_fd, "Playing: %s\n", strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
+            if (RESPOND_EARLY) {
+                dprintf(client_fd, "Playing: %s\n", strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
+                shutdown(client_fd, SHUT_WR);
+            }
+            spawn_play(path);
+            if (!RESPOND_EARLY)
+                dprintf(client_fd, "Playing: %s\n", strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
             log_play_history(path);
             prefetch_next(path);
         } else {
@@ -513,17 +518,27 @@ static void handle_command(int server_fd, int client_fd) {
 
         char target[PATH_MAX];
         if (get_next(last_played, offset, target, sizeof(target)) == 0) {
-            spawn_play(target);
             state_is_playing = 1;
             snprintf(last_played, sizeof(last_played), "%s", target);
             const char *basename = strrchr(target, '/');
             basename = basename ? basename + 1 : target;
-            if (offset == 1) {
-                dprintf(last_fd, "Next: %s\n", basename);
-            } else if (offset == -1) {
-                dprintf(last_fd, "Prev: %s\n", basename);
-            } else {
-                dprintf(last_fd, "Skipped %+d: %s\n", offset, basename);
+            if (RESPOND_EARLY) {
+                if (offset == 1)
+                    dprintf(last_fd, "Next: %s\n", basename);
+                else if (offset == -1)
+                    dprintf(last_fd, "Prev: %s\n", basename);
+                else
+                    dprintf(last_fd, "Skipped %+d: %s\n", offset, basename);
+                shutdown(last_fd, SHUT_WR);
+            }
+            spawn_play(target);
+            if (!RESPOND_EARLY) {
+                if (offset == 1)
+                    dprintf(last_fd, "Next: %s\n", basename);
+                else if (offset == -1)
+                    dprintf(last_fd, "Prev: %s\n", basename);
+                else
+                    dprintf(last_fd, "Skipped %+d: %s\n", offset, basename);
             }
             log_play_history(target);
             prefetch_next(target);
@@ -533,10 +548,15 @@ static void handle_command(int server_fd, int client_fd) {
         }
         return;  // client_fd already handled or will be closed by caller
     } else if (strcmp(action, "stop") == 0) {
+        if (RESPOND_EARLY) {
+            dprintf(client_fd, "Stopped\n");
+            shutdown(client_fd, SHUT_WR);
+        }
         kill_player();
         state_is_playing = 0;
         run_hook_async(hook_teardown, last_played);
-        dprintf(client_fd, "Stopped\n");
+        if (!RESPOND_EARLY)
+            dprintf(client_fd, "Stopped\n");
     } else if (strcmp(action, "status") == 0) {
         if (state_is_playing && last_played[0])
             dprintf(client_fd, "PLAYING %s\n", last_played);

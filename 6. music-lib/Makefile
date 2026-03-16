@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -O2 -march=native -mtune=native -flto -Wall -std=c23
 LDFLAGS = -flto
-LIBS = -lsqlite3 -lm -lpthread
+LIBS = -lsqlite3 -lpng -lz -lm -lpthread
 TARGET = qua-music-lib
 SRCS = poc.c
 PREFIX = /usr/local

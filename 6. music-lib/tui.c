@@ -26,9 +26,6 @@
 #include <sqlite3.h>
 #include <ncurses.h>
 
-/* cache format: define USE_JPG for jpg+raw RGB, undefine for png+kitty t=f */
-/* #define USE_JPG */
-
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
@@ -58,6 +55,7 @@ typedef struct {
 	char   date[16];
 	char   genre[64];
 	char   cover[512];
+	int    cover_w, cover_h;
 } track_t;
 
 static track_t *tracks;
@@ -126,11 +124,21 @@ static int         search_mode;    /* 0=normal, 1=typing search */
 static int         search_cur;     /* cursor position in query_buf */
 static int         sort_col = 3;   /* default: sort by album, -1=unsorted */
 static int         sort_asc = 1;   /* 1=ASC, 0=DESC */
-static char        album_filter[256]; /* exact album filter, empty=off */
+static char        filter_col[32];    /* db column to filter, empty=off */
+static char        filter_val[256];  /* exact value to match */
+/* info panel right-click targets (y range → db column + value) */
+#define INFO_CLICK_MAX 5
+static struct {
+	const char *db_col;
+	char        val[256];
+	int         y0, y1; /* screen row range [y0, y1) */
+} info_click[INFO_CLICK_MAX];
+static int n_info_click;
 static sqlite3    *mem_db;
 static sqlite3    *disk_db;
 static char        cur_art_path[PATH_MAX];
 static char        cache_dir[PATH_MAX];
+static const char  no_art_path[] = "/home/free2/code/musl2gcc/6. music-lib/no-art.png";
 
 /* ------------------------------------------------------------------ */
 /* DB                                                                  */
@@ -156,15 +164,22 @@ static int load_tracks(void)
 	tracks = malloc(MAX_TRACKS * sizeof(track_t));
 	if (!tracks) return -1;
 
-	/* add cover column if missing (pre-image-cache DB) */
+	/* add cover columns if missing (pre-image-cache DB) */
 	sqlite3_exec(mem_db,
 		"ALTER TABLE tracks ADD COLUMN cover TEXT DEFAULT '';",
+		NULL, NULL, NULL);
+	sqlite3_exec(mem_db,
+		"ALTER TABLE tracks ADD COLUMN cover_w INTEGER DEFAULT 0;",
+		NULL, NULL, NULL);
+	sqlite3_exec(mem_db,
+		"ALTER TABLE tracks ADD COLUMN cover_h INTEGER DEFAULT 0;",
 		NULL, NULL, NULL);
 
 	sqlite3_stmt *st;
 	const char *sql =
 		"SELECT path,format,sample_rate,bit_depth,duration,"
-		"       title,artist,album,album_artist,track_num,disc_num,date,genre,cover"
+		"       title,artist,album,album_artist,track_num,disc_num,date,genre,cover,"
+		"       cover_w,cover_h"
 		" FROM tracks ORDER BY id;";
 	if (sqlite3_prepare_v2(mem_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
 
@@ -185,7 +200,20 @@ static int load_tracks(void)
 		t->disc_num     = sqlite3_column_int(st, 10);
 		S(date,        11); S(genre,        12);
 		S(cover,       13);
+		t->cover_w      = sqlite3_column_int(st, 14);
+		t->cover_h      = sqlite3_column_int(st, 15);
 #undef S
+		/* fallback: empty title → basename, empty artist → "__" */
+		if (!*t->title) {
+			const char *sl = strrchr(t->path, '/');
+			const char *base = sl ? sl + 1 : t->path;
+			strncpy(t->title, base, sizeof(t->title) - 1);
+			/* strip extension */
+			char *dot = strrchr(t->title, '.');
+			if (dot) *dot = '\0';
+		}
+		if (!*t->artist)
+			strncpy(t->artist, "__", sizeof(t->artist) - 1);
 	}
 	sqlite3_finalize(st);
 	return 0;
@@ -268,14 +296,15 @@ static void rebuild_view(void)
 			return;
 		}
 		sqlite3_bind_text(st, 1, match, -1, SQLITE_TRANSIENT);
-	} else if (album_filter[0]) {
-		/* exact album filter */
+	} else if (filter_col[0]) {
+		/* column filter: LIKE for path (contains %), = otherwise */
+		const char *op = strchr(filter_val, '%') ? "LIKE" : "=";
 		snprintf(sql, sizeof(sql),
 			 "SELECT rowid FROM tracks"
-			 " WHERE album = ?%s;", order);
+			 " WHERE %s %s ?%s;", filter_col, op, order);
 		if (sqlite3_prepare_v2(mem_db, sql, -1, &st, NULL) != SQLITE_OK)
 			return;
-		sqlite3_bind_text(st, 1, album_filter, -1, SQLITE_STATIC);
+		sqlite3_bind_text(st, 1, filter_val, -1, SQLITE_STATIC);
 	} else {
 		snprintf(sql, sizeof(sql),
 			 "SELECT rowid FROM tracks%s;", order);
@@ -318,7 +347,7 @@ static void rebuild_view(void)
 						 "%s - %s%s%s",
 						 *aa ? aa : "?",
 						 *dt ? dt : "",
-						 *dt && *al ? " " : "",
+						 *dt && *al ? " - " : "",
 						 *al ? al : "?");
 				else
 					strncpy(vr->header, "(untagged)",
@@ -357,6 +386,35 @@ static int first_track(void)
 	for (int i = 0; i < nview; i++)
 		if (view[i].type == VIEW_TRACK) return i;
 	return 0;
+}
+
+static int next_group(int from, int page_size)
+{
+	/* find the next header after current position, return its first track */
+	for (int i = from + 1; i < nview; i++)
+		if (view[i].type == VIEW_HEADER)
+			return next_track(i);
+	/* no header found — fall back to page jump */
+	int r = from;
+	for (int n = page_size; n > 0; n--) r = next_track(r);
+	return r;
+}
+
+static int prev_group(int from, int page_size)
+{
+	/* find header of current group, then go to the one before it */
+	int cur_hdr = -1;
+	for (int i = from; i >= 0; i--)
+		if (view[i].type == VIEW_HEADER) { cur_hdr = i; break; }
+	if (cur_hdr >= 0) {
+		for (int i = cur_hdr - 1; i >= 0; i--)
+			if (view[i].type == VIEW_HEADER)
+				return next_track(i);
+	}
+	/* no header found — fall back to page jump */
+	int r = from;
+	for (int n = page_size; n > 0; n--) r = prev_track(r);
+	return r;
 }
 
 static int last_track(void)
@@ -450,19 +508,25 @@ static int load_state(void)
 
 static void copy_to_clipboard(const char *text)
 {
-	int pipefd[2];
-	if (pipe(pipefd) < 0) return;
-	pid_t pid = fork();
-	if (pid == 0) {
-		close(pipefd[1]);
-		dup2(pipefd[0], STDIN_FILENO);
-		close(pipefd[0]);
-		execlp("xclip", "xclip", "-selection", "clipboard", NULL);
-		_exit(1);
+	size_t len = strlen(text);
+	const char *cmds[] = {
+		"xclip -selection clipboard",
+		"xclip -selection primary",
+	};
+	const char *wl_cmds[] = {
+		"wl-copy",
+		"wl-copy --primary",
+	};
+	int nwl = getenv("WAYLAND_DISPLAY") ? 2 : 0;
+
+	for (int i = 0; i < 2 + nwl; i++) {
+		const char *cmd = i < 2 ? cmds[i] : wl_cmds[i - 2];
+		FILE *p = popen(cmd, "w");
+		if (p) {
+			fwrite(text, 1, len, p);
+			pclose(p);
+		}
 	}
-	close(pipefd[0]);
-	write(pipefd[1], text, strlen(text));
-	close(pipefd[1]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -577,9 +641,41 @@ static void render_left(int top, int selected, int lw, int rows_h)
 	for (int x = getcurx(stdscr); x < lw; x++) addch(' ');
 	attroff(COLOR_PAIR(3) | A_BOLD);
 
+	/* find group header for the selected track */
+	int sel_hdr = -1;
+	if (selected >= 0 && selected < nview) {
+		for (int i = selected; i >= 0; i--) {
+			if (view[i].type == VIEW_HEADER) { sel_hdr = i; break; }
+		}
+	}
+
+	/* sticky group header: if the top row's group header is off-screen,
+	 * reserve row 1 for it and shift data down by one */
+	int sticky = 0;
+	int sticky_hdr = -1;
+	if (top > 0 && top < nview && view[top].type == VIEW_TRACK) {
+		for (int i = top - 1; i >= 0; i--) {
+			if (view[i].type == VIEW_HEADER) {
+				sticky_hdr = i;
+				sticky = 1;
+				break;
+			}
+		}
+	}
+
+	if (sticky) {
+		int pair = (sticky_hdr == sel_hdr) ? 4 : 1;
+		move(1, 0);
+		attron(A_BOLD | COLOR_PAIR(pair));
+		addch(' ');
+		print_field(view[sticky_hdr].header, lw - 1);
+		attroff(A_BOLD | COLOR_PAIR(pair));
+	}
+
 	/* track/header rows */
-	for (int y = 0; y < rows_h; y++) {
-		int idx = top + y;
+	int y0 = sticky ? 1 : 0;
+	for (int y = y0; y < rows_h; y++) {
+		int idx = top + y - y0;
 		move(y + 1, 0);
 		if (idx >= nview) {
 			for (int x = 0; x < lw; x++) addch(' ');
@@ -589,10 +685,11 @@ static void render_left(int top, int selected, int lw, int rows_h)
 		view_row_t *vr = &view[idx];
 
 		if (vr->type == VIEW_HEADER) {
-			attron(A_BOLD | COLOR_PAIR(1));
+			int pair = (idx == sel_hdr) ? 4 : 1;
+			attron(A_BOLD | COLOR_PAIR(pair));
 			addch(' ');
 			print_field(vr->header, lw - 1);
-			attroff(A_BOLD | COLOR_PAIR(1));
+			attroff(A_BOLD | COLOR_PAIR(pair));
 		} else {
 			if (idx == selected) attron(COLOR_PAIR(2));
 			addch(' ');
@@ -672,9 +769,31 @@ static int info_line(int y, int x, int w, const char *label, const char *val)
 	return rows;
 }
 
+static void get_cell_size(int *cw, int *ch)
+{
+	struct winsize ws;
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 &&
+	    ws.ws_xpixel > 0 && ws.ws_col > 0) {
+		*cw = ws.ws_xpixel / ws.ws_col;
+		*ch = ws.ws_ypixel / ws.ws_row;
+	} else {
+		*cw = 8; *ch = 16;
+	}
+}
+
+static int art_split(int rw, int rows_h)
+{
+	int cw, ch;
+	get_cell_size(&cw, &ch);
+	int s = (rw * cw) / ch;  /* rows for a square */
+	if (s > rows_h - 2) s = rows_h - 2;
+	if (s < 1) s = 1;
+	return s;
+}
+
 static void render_right(int selected, int rx, int rw, int rows_h)
 {
-	int split = rows_h / 2;  /* art gets top half, info gets bottom */
+	int split = art_split(rw, rows_h);
 
 	/* -- Album Art header (top) -- */
 	attron(COLOR_PAIR(3) | A_BOLD);
@@ -706,11 +825,18 @@ static void render_right(int selected, int rx, int rw, int rows_h)
 		const char *fmt = strcmp(t->format,"wavpack")==0 ? "WavPack" :
 		                  strcmp(t->format,"flac")   ==0 ? "FLAC"    : t->format;
 
-		int y = div_y + 1;
+		int y = div_y + 1, h;
+		n_info_click = 0;
 		y += info_line(y, rx+1, rw-1, "Title",     *t->title ? t->title : "(no title)");
-		y += info_line(y, rx+1, rw-1, "Artist",    t->artist);
-		y += info_line(y, rx+1, rw-1, "Album",     t->album);
-		y += info_line(y, rx+1, rw-1, "AlbumArt",  t->album_artist);
+		h = info_line(y, rx+1, rw-1, "Artist",    t->artist);
+		if (h > 0) { info_click[n_info_click] = (typeof(info_click[0])){"artist", "", y, y+h}; strncpy(info_click[n_info_click].val, t->artist, 255); n_info_click++; }
+		y += h;
+		h = info_line(y, rx+1, rw-1, "Album",     t->album);
+		if (h > 0) { info_click[n_info_click] = (typeof(info_click[0])){"album", "", y, y+h}; strncpy(info_click[n_info_click].val, t->album, 255); n_info_click++; }
+		y += h;
+		h = info_line(y, rx+1, rw-1, "AlbumArt",  t->album_artist);
+		if (h > 0) { info_click[n_info_click] = (typeof(info_click[0])){"album_artist", "", y, y+h}; strncpy(info_click[n_info_click].val, t->album_artist, 255); n_info_click++; }
+		y += h;
 		if (t->track_num > 0) {
 			char tn[8]; snprintf(tn, sizeof(tn), "%d", t->track_num);
 			y += info_line(y, rx+1, rw-1, "Track",   tn);
@@ -720,8 +846,12 @@ static void render_right(int selected, int rx, int rw, int rows_h)
 		y += info_line(y, rx+1, rw-1, "Rate",      hz);
 		y += info_line(y, rx+1, rw-1, "Depth",     bd);
 		y += info_line(y, rx+1, rw-1, "Date",      t->date);
-		y += info_line(y, rx+1, rw-1, "Genre",     t->genre);
-		y += info_line(y, rx+1, rw-1, "Path",      t->path);
+		h = info_line(y, rx+1, rw-1, "Genre",     t->genre);
+		if (h > 0) { info_click[n_info_click] = (typeof(info_click[0])){"genre", "", y, y+h}; strncpy(info_click[n_info_click].val, t->genre, 255); n_info_click++; }
+		y += h;
+		h = info_line(y, rx+1, rw-1, "Path",      t->path);
+		if (h > 0) { info_click[n_info_click] = (typeof(info_click[0])){"path", "", y, y+h}; strncpy(info_click[n_info_click].val, t->path, sizeof(info_click[0].val)-1); n_info_click++; }
+		y += h;
 	}
 }
 
@@ -742,37 +872,95 @@ static int is_image_ext(const char *name)
 	}
 }
 
-/* search dir for largest cover/front image; returns 1 if found */
+/* find best cover in dir: prefer cover/front named, fall back to biggest
+ * image, then check one subdirectory level deep. */
+static int is_cover_name(const char *name)
+{
+	if (!is_image_ext(name)) return 0;
+	char lo = name[0] | 32;
+	return lo == 'c' || lo == 'f';
+}
+
 static int find_cover_art(const char *dir, char *out, int outmax)
 {
 	DIR *dp = opendir(dir);
 	if (!dp) return 0;
 
 	struct dirent *ep;
-	struct stat st;
-	char full[PATH_MAX];
-	off_t best = 0;
+	char best_named[PATH_MAX] = "";
+	off_t best_named_sz = 0;
+	char best_any[PATH_MAX] = "";
+	off_t best_any_sz = 0;
+	char subdirs[64][256];
+	int nsub = 0;
 
 	while ((ep = readdir(dp))) {
 		if (ep->d_name[0] == '.') continue;
+		if (ep->d_type == DT_DIR && nsub < 64) {
+			strncpy(subdirs[nsub], ep->d_name,
+				sizeof(subdirs[0]) - 1);
+			subdirs[nsub][sizeof(subdirs[0]) - 1] = '\0';
+			nsub++;
+			continue;
+		}
 		if (ep->d_type != DT_REG) continue;
 		if (!is_image_ext(ep->d_name)) continue;
 
-		char lo = tolower((unsigned char)ep->d_name[0]);
-		if (lo != 'c' && lo != 'f' &&
-		    !strcasestr(ep->d_name, "cover") &&
-		    !strcasestr(ep->d_name, "front"))
-			continue;
-
+		char full[PATH_MAX];
 		snprintf(full, sizeof(full), "%s/%s", dir, ep->d_name);
-		if (stat(full, &st) == 0 && st.st_size > best) {
-			best = st.st_size;
-			strncpy(out, full, outmax - 1);
-			out[outmax - 1] = '\0';
+		struct stat ist;
+		if (stat(full, &ist) != 0) continue;
+
+		if (is_cover_name(ep->d_name) &&
+		    ist.st_size > best_named_sz) {
+			best_named_sz = ist.st_size;
+			strncpy(best_named, full, sizeof(best_named) - 1);
+		}
+		if (ist.st_size > best_any_sz) {
+			best_any_sz = ist.st_size;
+			strncpy(best_any, full, sizeof(best_any) - 1);
 		}
 	}
 	closedir(dp);
-	return best > 0;
+
+	if (*best_named) { strncpy(out, best_named, outmax - 1); out[outmax - 1] = '\0'; return 1; }
+	if (*best_any)   { strncpy(out, best_any, outmax - 1);   out[outmax - 1] = '\0'; return 1; }
+
+	/* check one subdirectory level */
+	for (int i = 0; i < nsub; i++) {
+		char subpath[PATH_MAX];
+		snprintf(subpath, sizeof(subpath), "%s/%s", dir, subdirs[i]);
+		dp = opendir(subpath);
+		if (!dp) continue;
+		while ((ep = readdir(dp))) {
+			if (ep->d_name[0] == '.') continue;
+			if (ep->d_type != DT_REG) continue;
+			if (!is_image_ext(ep->d_name)) continue;
+
+			char full[PATH_MAX];
+			snprintf(full, sizeof(full), "%s/%s",
+				 subpath, ep->d_name);
+			struct stat ist;
+			if (stat(full, &ist) != 0) continue;
+
+			if (is_cover_name(ep->d_name) &&
+			    ist.st_size > best_named_sz) {
+				best_named_sz = ist.st_size;
+				strncpy(best_named, full,
+					sizeof(best_named) - 1);
+			}
+			if (ist.st_size > best_any_sz) {
+				best_any_sz = ist.st_size;
+				strncpy(best_any, full,
+					sizeof(best_any) - 1);
+			}
+		}
+		closedir(dp);
+	}
+
+	if (*best_named) { strncpy(out, best_named, outmax - 1); out[outmax - 1] = '\0'; return 1; }
+	if (*best_any)   { strncpy(out, best_any, outmax - 1);   out[outmax - 1] = '\0'; return 1; }
+	return 0;
 }
 
 /* get parent directory of a file path into buf */
@@ -800,14 +988,9 @@ static unsigned long hash_str(const char *s)
 static void get_cache_path(const char *src, char *out, int n)
 {
 	unsigned long h = hash_str(src);
-#ifdef USE_JPG
-	snprintf(out, n, "%s/%016lx.jpg", cache_dir, h);
-#else
 	snprintf(out, n, "%s/%016lx.png", cache_dir, h);
-#endif
 }
 
-#ifndef USE_JPG
 /* read width/height from PNG header (IHDR at bytes 16-23) */
 static int img_dimensions(const char *path, int *w, int *h)
 {
@@ -820,38 +1003,6 @@ static int img_dimensions(const char *path, int *w, int *h)
 	*h = (buf[20] << 24) | (buf[21] << 16) | (buf[22] << 8) | buf[23];
 	return 0;
 }
-#else
-/* read width/height from JPEG SOF0/SOF2 marker */
-static int img_dimensions(const char *path, int *w, int *h)
-{
-	FILE *f = fopen(path, "rb");
-	if (!f) return -1;
-	unsigned char buf[2];
-	if (fread(buf, 1, 2, f) != 2 || buf[0] != 0xFF || buf[1] != 0xD8) {
-		fclose(f);
-		return -1;
-	}
-	for (;;) {
-		if (fread(buf, 1, 2, f) != 2 || buf[0] != 0xFF) break;
-		int marker = buf[1];
-		if (marker == 0xC0 || marker == 0xC2) {
-			unsigned char sof[7];
-			if (fread(sof, 1, 7, f) != 7) break;
-			*h = (sof[3] << 8) | sof[4];
-			*w = (sof[5] << 8) | sof[6];
-			fclose(f);
-			return 0;
-		}
-		/* skip segment */
-		if (fread(buf, 1, 2, f) != 2) break;
-		int seglen = (buf[0] << 8) | buf[1];
-		if (seglen < 2) break;
-		fseek(f, seglen - 2, SEEK_CUR);
-	}
-	fclose(f);
-	return -1;
-}
-#endif
 
 /* resize source image to max 1200x1200 (preserving aspect), save to dst */
 static int magick_cache(const char *src, const char *dst)
@@ -895,10 +1046,8 @@ static int magick_cache(const char *src, const char *dst)
 }
 
 /* ------------------------------------------------------------------ */
-/* Kitty graphics protocol (Unicode placement, like yazi)              */
+/* Kitty graphics protocol (direct placement)                          */
 /* ------------------------------------------------------------------ */
-
-/* image ID for kitty graphics */
 
 static const char b64tab[] =
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -930,205 +1079,46 @@ static int b64_encode(const unsigned char *in, int len, char *out, int outmax)
 	return j;
 }
 
-static void get_cell_size(int *cw, int *ch)
-{
-	struct winsize ws;
-	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 &&
-	    ws.ws_xpixel > 0 && ws.ws_col > 0) {
-		*cw = ws.ws_xpixel / ws.ws_col;
-		*ch = ws.ws_ypixel / ws.ws_row;
-	} else {
-		*cw = 8; *ch = 16;
-	}
-}
-
-static const unsigned int diacritics[] = {
-	0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F,
-	0x0346, 0x034A, 0x034B, 0x034C, 0x0350, 0x0351, 0x0352, 0x0357,
-	0x035B, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369,
-	0x036A, 0x036B, 0x036C, 0x036D, 0x036E, 0x036F, 0x0483, 0x0484,
-	0x0485, 0x0486, 0x0487, 0x0592, 0x0593, 0x0594, 0x0595, 0x0597,
-	0x0598, 0x0599, 0x059C, 0x059D, 0x059E, 0x059F, 0x05A0, 0x05A1,
-	0x05A8, 0x05A9, 0x05AB, 0x05AC, 0x05AF, 0x05C4, 0x0610, 0x0611,
-	0x0612, 0x0613, 0x0614, 0x0615, 0x0616, 0x0617, 0x0657, 0x0658,
-	0x0659, 0x065A, 0x065B, 0x065D, 0x065E, 0x06D6, 0x06D7, 0x06D8,
-	0x06D9, 0x06DA, 0x06DB, 0x06DC, 0x06DF, 0x06E0, 0x06E1, 0x06E2,
-	0x06E4, 0x06E7, 0x06E8, 0x06EB, 0x06EC, 0x0730, 0x0732, 0x0733,
-	0x0735, 0x0736, 0x073A, 0x073D, 0x073F, 0x0740, 0x0741, 0x0743,
-	0x0745, 0x0747, 0x0749, 0x074A, 0x07EB, 0x07EC, 0x07ED, 0x07EE,
-	0x07EF, 0x07F0, 0x07F1, 0x07F3, 0x0816, 0x0817, 0x0818, 0x0819,
-	0x081B, 0x081C, 0x081D, 0x081E, 0x081F, 0x0820, 0x0821, 0x0822,
-	0x0823, 0x0825, 0x0826, 0x0827, 0x0829, 0x082A, 0x082B, 0x082C,
-};
-#define NDIACRITICS ((int)(sizeof(diacritics)/sizeof(diacritics[0])))
-
-static int utf8_put(char *buf, unsigned int cp)
-{
-	if (cp < 0x80) {
-		buf[0] = cp;
-		return 1;
-	} else if (cp < 0x800) {
-		buf[0] = 0xC0 | (cp >> 6);
-		buf[1] = 0x80 | (cp & 0x3F);
-		return 2;
-	} else if (cp < 0x10000) {
-		buf[0] = 0xE0 | (cp >> 12);
-		buf[1] = 0x80 | ((cp >> 6) & 0x3F);
-		buf[2] = 0x80 | (cp & 0x3F);
-		return 3;
-	} else {
-		buf[0] = 0xF0 | (cp >> 18);
-		buf[1] = 0x80 | ((cp >> 12) & 0x3F);
-		buf[2] = 0x80 | ((cp >> 6) & 0x3F);
-		buf[3] = 0x80 | (cp & 0x3F);
-		return 4;
-	}
-}
-
 static unsigned int kitty_img_id;
+static unsigned int kitty_id_counter;
 
-static void kitty_erase(int y, int x, int cols, int rows)
+static void kitty_delete(unsigned int id)
 {
-	/* overwrite placeholder characters with spaces */
-	char buf[16384];
-	int pos = 0;
-	for (int row = 0; row < rows && pos + 256 < (int)sizeof(buf); row++) {
-		pos += snprintf(buf + pos, sizeof(buf) - pos,
-				"\033[%d;%dH", y + row + 1, x + 1);
-		for (int col = 0; col < cols && pos + 4 < (int)sizeof(buf); col++)
-			buf[pos++] = ' ';
-	}
-	write(STDOUT_FILENO, buf, pos);
+	char cmd[64];
+	int n = snprintf(cmd, sizeof(cmd),
+		"\033_Gq=2,a=d,d=i,i=%u\033\\", id);
+	write(STDOUT_FILENO, cmd, n);
+}
 
-	/* delete all kitty image data */
+static void kitty_delete_all(void)
+{
 	const char cmd[] = "\033_Gq=2,a=d,d=A\033\\";
 	write(STDOUT_FILENO, cmd, sizeof(cmd) - 1);
 }
 
-#ifndef USE_JPG
-/* transmit PNG file via kitty t=f */
-static int kitty_transmit_png(const char *path, int cols, int rows)
+/* transmit PNG file via kitty t=f (store only, no display) */
+static int kitty_transmit_png(const char *path)
 {
-	kitty_img_id = getpid() & 0xFFFFFF;
+	kitty_img_id = ++kitty_id_counter;
 	int pathlen = strlen(path);
 	char b64path[PATH_MAX * 2];
 	b64_encode((unsigned char *)path, pathlen, b64path, sizeof(b64path));
 	char cmd[PATH_MAX * 2 + 128];
 	int n = snprintf(cmd, sizeof(cmd),
-		"\033_Gq=2,a=T,C=1,U=1,f=100,t=f,i=%u,c=%d,r=%d;%s\033\\",
-		kitty_img_id, cols, rows, b64path);
+		"\033_Gq=2,a=t,f=100,t=f,i=%u;%s\033\\",
+		kitty_img_id, b64path);
 	write(STDOUT_FILENO, cmd, n);
 	return 0;
 }
-#else
-/* bilinear downscale src (sw x sh) → dst (dw x dh), 3 channels */
-static void rgb_downscale(const unsigned char *src, int sw, int sh,
-			  unsigned char *dst, int dw, int dh)
-{
-	for (int y = 0; y < dh; y++) {
-		float sy = (y + 0.5f) * sh / dh - 0.5f;
-		int y0 = (int)sy, y1 = y0 + 1;
-		float fy = sy - y0;
-		if (y0 < 0) y0 = 0;
-		if (y1 >= sh) y1 = sh - 1;
-		for (int x = 0; x < dw; x++) {
-			float sx = (x + 0.5f) * sw / dw - 0.5f;
-			int x0 = (int)sx, x1 = x0 + 1;
-			float fx = sx - x0;
-			if (x0 < 0) x0 = 0;
-			if (x1 >= sw) x1 = sw - 1;
-			const unsigned char *p00 = src + (y0*sw + x0)*3;
-			const unsigned char *p10 = src + (y0*sw + x1)*3;
-			const unsigned char *p01 = src + (y1*sw + x0)*3;
-			const unsigned char *p11 = src + (y1*sw + x1)*3;
-			for (int c = 0; c < 3; c++) {
-				float v = p00[c]*(1-fx)*(1-fy) + p10[c]*fx*(1-fy)
-					+ p01[c]*(1-fx)*fy + p11[c]*fx*fy;
-				dst[(y*dw + x)*3 + c] = (unsigned char)(v + 0.5f);
-			}
-		}
-	}
-}
 
-/* decode cached JPG, downscale, transmit raw RGB to kitty */
-static int kitty_transmit_rgb(const char *path, int pw, int ph,
-			      int cols, int rows)
-{
-	int iw, ih, ch;
-	unsigned char *img = stbi_load(path, &iw, &ih, &ch, 3);
-	if (!img) return -1;
-
-	/* downscale to display size */
-	size_t rgblen = (size_t)pw * ph * 3;
-	unsigned char *rgb = malloc(rgblen);
-	rgb_downscale(img, iw, ih, rgb, pw, ph);
-	stbi_image_free(img);
-
-	/* base64 encode */
-	int b64cap = ((rgblen + 2) / 3) * 4 + 1;
-	char *b64 = malloc(b64cap);
-	int b64len = b64_encode(rgb, rgblen, b64, b64cap);
-	free(rgb);
-
-	/* send in 4096-byte chunks */
-	kitty_img_id = getpid() & 0xFFFFFF;
-	int pos = 0;
-	char hdr[256];
-
-	while (pos < b64len) {
-		int chunk = b64len - pos;
-		if (chunk > 4096) chunk = 4096;
-		int more = (pos + chunk < b64len) ? 1 : 0;
-
-		int hlen;
-		if (pos == 0)
-			hlen = snprintf(hdr, sizeof(hdr),
-				"\033_Gq=2,a=T,C=1,U=1,f=24,s=%d,v=%d,"
-				"i=%u,c=%d,r=%d,m=%d;",
-				pw, ph, kitty_img_id, cols, rows, more);
-		else
-			hlen = snprintf(hdr, sizeof(hdr),
-				"\033_Gm=%d;", more);
-
-		write(STDOUT_FILENO, hdr, hlen);
-		write(STDOUT_FILENO, b64 + pos, chunk);
-		write(STDOUT_FILENO, "\033\\", 2);
-		pos += chunk;
-	}
-
-	free(b64);
-	return 0;
-}
-#endif
-
-/* place image using Unicode placeholders (U+10EEEE + diacritics per cell) */
+/* place image at screen position via direct placement */
 static void kitty_place(int y, int x, int cols, int rows)
 {
-	/* encode image ID into foreground color RGB */
-	unsigned r = (kitty_img_id >> 16) & 0xff;
-	unsigned g = (kitty_img_id >> 8) & 0xff;
-	unsigned b = kitty_img_id & 0xff;
-
-	char buf[65536];
-	int pos = 0;
-
-	pos += snprintf(buf + pos, sizeof(buf) - pos,
-			"\033[38;2;%u;%u;%um", r, g, b);
-
-	for (int row = 0; row < rows && pos + 256 < (int)sizeof(buf); row++) {
-		pos += snprintf(buf + pos, sizeof(buf) - pos,
-				"\033[%d;%dH", y + row + 1, x + 1);
-		for (int col = 0; col < cols && pos + 32 < (int)sizeof(buf); col++) {
-			pos += utf8_put(buf + pos, 0x10EEEE);
-			int ri = row < NDIACRITICS ? row : 0;
-			pos += utf8_put(buf + pos, diacritics[ri]);
-			int ci = col < NDIACRITICS ? col : 0;
-			pos += utf8_put(buf + pos, diacritics[ci]);
-		}
-	}
-
-	pos += snprintf(buf + pos, sizeof(buf) - pos, "\033[39m");
-	write(STDOUT_FILENO, buf, pos);
+	char cmd[256];
+	int n = snprintf(cmd, sizeof(cmd),
+		"\033[%d;%dH\033_Gq=2,a=p,i=%u,c=%d,r=%d,C=1\033\\",
+		y + 1, x + 1, kitty_img_id, cols, rows);
+	write(STDOUT_FILENO, cmd, n);
 }
 
 static void render(int top, int selected)
@@ -1143,6 +1133,7 @@ static void render(int top, int selected)
 
 
 	/* status / query_buf bar */
+	static const char keys[] = "/: search  enter/p: play  s: stop  o: open  q: quit";
 	attron(COLOR_PAIR(3) | A_BOLD);
 	int ntracks_in_view = 0;
 	for (int i = 0; i < nview; i++)
@@ -1160,13 +1151,12 @@ static void render(int top, int selected)
 			addch(' ');
 			attroff(A_UNDERLINE);
 		}
-		printw("  [%d results]", ntracks_in_view);
+		printw("  [%d results]  |  %s", ntracks_in_view, keys);
 	}
 	else if (*query_buf)
-		printw(" [%s] %d results  |  /: search  ESC: clear", query_buf, ntracks_in_view);
+		printw(" [filter:%s] %d results  |  %s", query_buf, ntracks_in_view, keys);
 	else
-		printw(" %d tracks  |  /: search  Enter: play  q: quit",
-		       ntracks_in_view);
+		printw(" %d tracks  |  %s", ntracks_in_view, keys);
 	for (int x = getcurx(stdscr); x < COLS; x++) addch(' ');
 	attroff(COLOR_PAIR(3) | A_BOLD);
 
@@ -1175,7 +1165,7 @@ static void render(int top, int selected)
 	/* kitty: album art after ncurses flush */
 	static int  art_cols;     /* actual cols image occupies */
 	static int  art_rows;     /* actual rows image occupies */
-	int split = rows_h / 2;
+	int split = art_split(rw, rows_h);
 	int art_y = 1;           /* right below "Album Art" header */
 	int art_h = split;
 
@@ -1185,14 +1175,18 @@ static void render(int top, int selected)
 
 		/* get cover art — prefer pre-cached from track data */
 		static char last_art_dir[PATH_MAX];
+		static char last_art_val[PATH_MAX];
 		char dir[PATH_MAX] = "";
 		char resolved[PATH_MAX] = "";
+		int db_cw = 0, db_ch = 0;
 		if (selected >= 0 && selected < nview &&
 		    view[selected].type == VIEW_TRACK) {
 			track_t *t = &tracks[view[selected].track_idx];
 			if (*t->cover) {
 				strncpy(resolved, t->cover,
 					sizeof(resolved) - 1);
+				db_cw = t->cover_w;
+				db_ch = t->cover_h;
 			} else {
 				/* fallback: scan + cache on the fly */
 				path_dir(t->path, dir, sizeof(dir));
@@ -1206,9 +1200,15 @@ static void render(int top, int selected)
 						if (stat(resolved, &cst) != 0)
 							magick_cache(src,
 								resolved);
+					} else {
+						strncpy(resolved, no_art_path,
+							sizeof(resolved) - 1);
 					}
+					strncpy(last_art_val, resolved,
+						sizeof(last_art_val) - 1);
+					last_art_val[sizeof(last_art_val) - 1] = '\0';
 				} else if (*dir) {
-					strncpy(resolved, cur_art_path,
+					strncpy(resolved, last_art_val,
 						sizeof(resolved) - 1);
 				}
 				strncpy(last_art_dir, dir,
@@ -1217,20 +1217,23 @@ static void render(int top, int selected)
 		}
 
 		if (strcmp(resolved, cur_art_path) != 0) {
+			unsigned int old_id = kitty_img_id;
+			int had_old = *cur_art_path;
+
 			strncpy(cur_art_path, resolved,
 				sizeof(cur_art_path) - 1);
 			cur_art_path[sizeof(cur_art_path) - 1] = '\0';
-			kitty_erase(art_y, rx, rw, art_h);
 
-			/* transmit */
+			/* transmit new image (old still visible) */
 			if (*cur_art_path) {
-
-				/* compute actual cols/rows from aspect ratio */
-				int iw, ih;
+				int iw = db_cw, ih = db_ch;
 				art_cols = rw;
 				art_rows = art_h;
-				if (img_dimensions(cur_art_path, &iw, &ih) == 0 &&
-				    iw > 0 && ih > 0) {
+				if ((iw <= 0 || ih <= 0) &&
+				    img_dimensions(cur_art_path, &iw, &ih) != 0) {
+					iw = 0; ih = 0;
+				}
+				if (iw > 0 && ih > 0) {
 					int cw, ch;
 					get_cell_size(&cw, &ch);
 					int area_pw = rw * cw;
@@ -1246,26 +1249,22 @@ static void render(int top, int selected)
 					if (art_cols > rw) art_cols = rw;
 					if (art_rows < 1) art_rows = 1;
 					if (art_rows > art_h) art_rows = art_h;
-#ifdef USE_JPG
-					kitty_transmit_rgb(cur_art_path, disp_pw, disp_ph,
-							   art_cols, art_rows);
-#else
-					kitty_transmit_png(cur_art_path, art_cols, art_rows);
-#endif
+					kitty_transmit_png(cur_art_path);
 				}
+				/* place new on top, then delete old */
+				kitty_place(art_y, rx, art_cols, art_rows);
+				if (had_old)
+					kitty_delete(old_id);
+			} else {
+				/* no new art — just delete old */
+				if (had_old)
+					kitty_delete(old_id);
 			}
 		}
 
-		/* re-place every frame — erase first if viewport scrolled up */
-		static int prev_top = -1;
-		if (top < prev_top && *cur_art_path)
-			kitty_erase(art_y, rx, rw, art_h);
-		prev_top = top;
-
+		/* re-place every frame for stability */
 		if (*cur_art_path)
 			kitty_place(art_y, rx, art_cols, art_rows);
-		else
-			kitty_erase(art_y, rx, rw, art_h);
 
 		/* restore cursor for ncurses */
 		write(STDOUT_FILENO, "\0338", 2);
@@ -1318,8 +1317,9 @@ int main(int argc, char *argv[])
 	idlok(stdscr, FALSE);
 	start_color(); use_default_colors();
 	init_pair(1, COLOR_BLACK, 132);            /* group headers (dusty rose) */
-	init_pair(2, 132, -1);                    /* selection (dusty rose) */
+	init_pair(2, COLOR_GREEN, -1);            /* selection (green) */
 	init_pair(3, COLOR_BLACK, COLOR_YELLOW);  /* top/bottom bars */
+	init_pair(4, COLOR_GREEN, 132);           /* active group header */
 	mousemask(BUTTON1_CLICKED | BUTTON3_CLICKED | BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
 	mouseinterval(0);
 
@@ -1377,18 +1377,80 @@ int main(int argc, char *argv[])
 						}
 					}
 				} else if ((ev.bstate & BUTTON3_CLICKED) &&
-					   ev.x >= (COLS * 62) / 100 &&
-					   *cur_art_path) {
-					/* right-click on art area: open original image */
-					pid_t pid = fork();
-					if (pid == 0) {
-						setsid();
-						freopen("/dev/null", "w", stdout);
-						freopen("/dev/null", "w", stderr);
-						freopen("/dev/null", "r", stdin);
-						execlp("nsxiv-rifle", "nsxiv-rifle",
-						       cur_art_path, NULL);
-						_exit(1);
+					   ev.x >= (COLS * 62) / 100) {
+					/* right-click on info field: filter */
+					int handled = 0;
+					int irx = (COLS * 62) / 100;
+					int irw = COLS - irx;
+					int lbl_w = 9;
+					int val_x = irx + 1 + lbl_w;
+					int val_w = irw - 1 - lbl_w;
+					for (int i = 0; i < n_info_click; i++) {
+						if (ev.y >= info_click[i].y0 &&
+						    ev.y < info_click[i].y1 &&
+						    info_click[i].val[0]) {
+							if (strcmp(info_click[i].db_col, "path") == 0 && val_w > 0) {
+								/* map click to char index in path */
+								int ci = (ev.y - info_click[i].y0) * val_w
+									+ (ev.x - val_x);
+								const char *p = info_click[i].val;
+								int plen = strlen(p);
+								if (ci < 0) ci = 0;
+								if (ci >= plen) ci = plen - 1;
+								/* find the next '/' at or after click */
+								int cut = ci;
+								while (cut < plen && p[cut] != '/') cut++;
+								if (cut >= plen) cut = plen - 1;
+								/* walk back to include this dir */
+								while (cut > 0 && p[cut] != '/') cut--;
+								if (cut <= 0) break;
+								strncpy(filter_col, "path", sizeof(filter_col)-1);
+								snprintf(filter_val, sizeof(filter_val),
+									 "%.*s/%%", cut, p);
+							} else {
+								strncpy(filter_col, info_click[i].db_col, sizeof(filter_col)-1);
+								strncpy(filter_val, info_click[i].val, sizeof(filter_val)-1);
+								/* replace commas with spaces for artist fields */
+								if (strcmp(info_click[i].db_col, "artist") == 0 ||
+								    strcmp(info_click[i].db_col, "album_artist") == 0) {
+									for (char *c = filter_val; *c; c++)
+										if (*c == ',') *c = ' ';
+								}
+							}
+							copy_to_clipboard(filter_val);
+							query_buf[0] = '\0';
+							rebuild_view();
+							selected = first_track();
+							top = 0;
+							dirty = 1;
+							handled = 1;
+							break;
+						}
+					}
+					int rx = (COLS * 62) / 100;
+					int rw = COLS - rx;
+					int asplit = art_split(rw, LINES - 2);
+					if (!handled && ev.y >= 1 && ev.y <= asplit &&
+					    *cur_art_path &&
+					    selected >= 0 && selected < nview &&
+					    view[selected].type == VIEW_TRACK) {
+						/* right-click on art area: open original image */
+						track_t *t = &tracks[view[selected].track_idx];
+						char adir[PATH_MAX], src[PATH_MAX] = "";
+						path_dir(t->path, adir, sizeof(adir));
+						find_cover_art(adir, src, sizeof(src));
+						if (*src) {
+							pid_t pid = fork();
+							if (pid == 0) {
+								setsid();
+								freopen("/dev/null", "w", stdout);
+								freopen("/dev/null", "w", stderr);
+								freopen("/dev/null", "r", stdin);
+								execlp("nsxiv-rifle", "nsxiv-rifle",
+								       src, NULL);
+								_exit(1);
+							}
+						}
 					}
 				}
 			}
@@ -1400,6 +1462,8 @@ int main(int argc, char *argv[])
 				search_mode = 0;
 				query_buf[0] = '\0';
 				search_cur = 0;
+				filter_col[0] = '\0';
+				filter_val[0] = '\0';
 				rebuild_view();
 				selected = first_track();
 				top = 0;
@@ -1407,7 +1471,6 @@ int main(int argc, char *argv[])
 				break;
 			case KEY_ENTER: case '\n':
 				search_mode = 0;
-				play_track(selected);
 				dirty = 1;
 				break;
 			case KEY_UP:
@@ -1447,7 +1510,13 @@ int main(int argc, char *argv[])
 				}
 				break;
 			}
-			case KEY_RESIZE: rows_h = LINES - 2; dirty = 1; break;
+			case KEY_RESIZE:
+				kitty_delete_all();
+				clear();
+				rows_h = LINES - 2;
+				cur_art_path[0] = '\0';
+				dirty = 1;
+				break;
 			default:
 				if (ch >= 32 && ch < 127) {
 					int len = strlen(query_buf);
@@ -1469,17 +1538,14 @@ int main(int argc, char *argv[])
 		} else {
 			/* normal mode */
 			switch (ch) {
-			case 27: /* ESC */
-				if (*query_buf || *album_filter) {
-					query_buf[0] = '\0';
-					album_filter[0] = '\0';
-					rebuild_view();
-					selected = first_track();
-					top = 0;
-					dirty = 1;
-				} else {
-					goto quit;
-				}
+			case 27: /* ESC — clear filters only, q to quit */
+				query_buf[0] = '\0';
+				filter_col[0] = '\0';
+				filter_val[0] = '\0';
+				rebuild_view();
+				selected = first_track();
+				top = 0;
+				dirty = 1;
 				break;
 			case '/':
 				search_mode = 1;
@@ -1492,17 +1558,11 @@ int main(int argc, char *argv[])
 				break;
 			case KEY_UP:    case 'k': selected = prev_track(selected); break;
 			case KEY_DOWN:  case 'j': selected = next_track(selected); break;
-			case KEY_PPAGE: case 'u': {
-				int i = selected;
-				for (int n = rows_h; n > 0; n--) i = prev_track(i);
-				selected = i; break;
-			}
-			case KEY_NPAGE: case 'd': {
-				int i = selected;
-				for (int n = rows_h; n > 0; n--) i = next_track(i);
-				selected = i; break;
-			}
-			case 15: /* Ctrl+O — open track's directory */
+			case KEY_PPAGE: case 'u':
+				selected = prev_group(selected, rows_h); break;
+			case KEY_NPAGE: case 'd':
+				selected = next_group(selected, rows_h); break;
+			case 'o': /* open track's directory */
 				if (selected >= 0 && selected < nview &&
 				    view[selected].type == VIEW_TRACK) {
 					const char *fpath =
@@ -1523,13 +1583,23 @@ int main(int argc, char *argv[])
 				if (selected >= 0 && selected < nview &&
 				    view[selected].type == VIEW_TRACK) {
 					track_t *t = &tracks[view[selected].track_idx];
-					strncpy(album_filter, t->album,
-						sizeof(album_filter)-1);
-					album_filter[sizeof(album_filter)-1] = '\0';
+					strncpy(filter_col, "album", sizeof(filter_col)-1);
+					strncpy(filter_val, t->album, sizeof(filter_val)-1);
 					query_buf[0] = '\0';
 					rebuild_view();
 					selected = first_track();
 					dirty = 1;
+				}
+				break;
+			}
+			case 'p':
+				play_track(selected);
+				break;
+			case 's': {
+				pid_t pid = fork();
+				if (pid == 0) {
+					execlp("qua-stop", "qua-stop", NULL);
+					_exit(1);
 				}
 				break;
 			}
@@ -1547,7 +1617,13 @@ int main(int argc, char *argv[])
 			}
 			case KEY_HOME: selected = first_track(); break;
 			case KEY_END:  selected = last_track();  break;
-			case KEY_RESIZE: rows_h = LINES - 2; dirty = 1; break;
+			case KEY_RESIZE:
+				kitty_delete_all();
+				clear();
+				rows_h = LINES - 2;
+				cur_art_path[0] = '\0';
+				dirty = 1;
+				break;
 			default: break;
 			}
 		}
@@ -1557,10 +1633,18 @@ int main(int argc, char *argv[])
 		else if (selected >= top + rows_h)
 			top = selected - rows_h + 1;
 
+		/* sticky header steals a row — tighten clamp */
+		if (top > 0 && top < nview && view[top].type == VIEW_TRACK &&
+		    selected >= top + rows_h - 1) {
+			top = selected - rows_h + 2;
+			if (top < 0) top = 0;
+		}
+
 		if (dirty || selected != prev || top != old_top)
 			render(top, selected);
 	}
 quit:
+	kitty_delete_all();
 	endwin();
 	save_state(selected);
 	/* OS reclaims all resources on exit — skip slow cleanup */

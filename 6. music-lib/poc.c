@@ -1,5 +1,5 @@
 /* poc.c - music library indexer
- * Reads FLAC/WavPack metadata natively, loads into SQLite.
+ * Reads FLAC/WavPack/MP3 metadata natively, loads into SQLite.
  * No forking, no external tools.
  *
  * Usage:
@@ -22,13 +22,12 @@
 #include <sys/wait.h>
 #include <pthread.h>
 #include <sqlite3.h>
+#include <png.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize2.h"
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
 
 /* ------------------------------------------------------------------ */
 /* Shared types                                                        */
@@ -463,7 +462,9 @@ static const char *SCHEMA =
 	"  date         TEXT,"
 	"  genre        TEXT,"
 	"  audiomd5     TEXT,"
-	"  cover        TEXT DEFAULT ''"
+	"  cover        TEXT DEFAULT '',"
+	"  cover_w      INTEGER DEFAULT 0,"
+	"  cover_h      INTEGER DEFAULT 0"
 	");"
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_dev_ino ON tracks(dev, ino);";
 
@@ -479,7 +480,7 @@ static void db_migrate(sqlite3 *db)
 		"SELECT dev FROM tracks LIMIT 0;", -1, &probe, NULL);
 	if (rc == SQLITE_OK) {
 		sqlite3_finalize(probe);
-		/* add cover column if missing */
+		/* add cover columns if missing */
 		rc = sqlite3_prepare_v2(db,
 			"SELECT cover FROM tracks LIMIT 0;", -1, &probe, NULL);
 		if (rc == SQLITE_OK)
@@ -488,6 +489,18 @@ static void db_migrate(sqlite3 *db)
 			sqlite3_exec(db,
 				"ALTER TABLE tracks ADD COLUMN cover TEXT DEFAULT '';",
 				NULL, NULL, NULL);
+		rc = sqlite3_prepare_v2(db,
+			"SELECT cover_w FROM tracks LIMIT 0;", -1, &probe, NULL);
+		if (rc == SQLITE_OK)
+			sqlite3_finalize(probe);
+		else {
+			sqlite3_exec(db,
+				"ALTER TABLE tracks ADD COLUMN cover_w INTEGER DEFAULT 0;",
+				NULL, NULL, NULL);
+			sqlite3_exec(db,
+				"ALTER TABLE tracks ADD COLUMN cover_h INTEGER DEFAULT 0;",
+				NULL, NULL, NULL);
+		}
 		return;
 	}
 
@@ -634,7 +647,205 @@ static const char *check_ext(const char *name, size_t len)
 		return "flac";
 	if (len > 3 && strcasecmp(name + len - 3, ".wv") == 0)
 		return "wavpack";
+	if (len > 4 && strcasecmp(name + len - 4, ".mp3") == 0)
+		return "mp3";
 	return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* MP3 native parser                                                   */
+/* Reads ID3v2 tags + first frame header for stream info.             */
+/* ------------------------------------------------------------------ */
+
+static uint32_t mp3_decode_be(const uint8_t *b)
+{
+	return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+	       ((uint32_t)b[2] << 8)  | (uint32_t)b[3];
+}
+
+static uint32_t mp3_decode_ss(const uint8_t *b)
+{
+	return ((b[0] & 0x7F) << 21) | ((b[1] & 0x7F) << 14) |
+	       ((b[2] & 0x7F) << 7)  | (b[3] & 0x7F);
+}
+
+static int parse_mp3(const char *path, stream_info_t *si, tags_t *tags)
+{
+	int fd = open(path, O_RDONLY);
+	if (fd < 0) return -1;
+
+	si->bits_per_sample = 16; /* MP3 is decoded to 16-bit PCM */
+
+	uint8_t hdr[10];
+	if (read(fd, hdr, 10) < 10) { close(fd); return -1; }
+
+	uint32_t id3_size = 0;
+	if (memcmp(hdr, "ID3", 3) == 0) {
+		id3_size = mp3_decode_ss(&hdr[6]);
+		long tag_end = 10 + id3_size;
+		int version = hdr[3];
+
+		while (lseek(fd, 0, SEEK_CUR) < tag_end - 10) {
+			uint8_t fhdr[10];
+			if (read(fd, fhdr, 10) < 10) break;
+			if (fhdr[0] == 0) break;
+
+			uint32_t fsize = (version == 4) ?
+				mp3_decode_ss(&fhdr[4]) :
+				mp3_decode_be(&fhdr[4]);
+
+			struct { const char *id; char *dest; size_t max; } map[] = {
+				{"TIT2", tags->title,        sizeof(tags->title) - 1},
+				{"TPE1", tags->artist,       sizeof(tags->artist) - 1},
+				{"TALB", tags->album,        sizeof(tags->album) - 1},
+				{"TDRC", tags->date,         sizeof(tags->date) - 1},
+				{"TYER", tags->date,         sizeof(tags->date) - 1},
+				{"TPE2", tags->album_artist, sizeof(tags->album_artist) - 1},
+				{"TRCK", NULL,               0},
+				{"TPOS", NULL,               0},
+				{"TCON", tags->genre,        sizeof(tags->genre) - 1},
+			};
+
+			int handled = 0;
+			for (int i = 0; i < 9; i++) {
+				if (memcmp(fhdr, map[i].id, 4) != 0)
+					continue;
+				if (fsize > 4096) break;
+
+				uint8_t enc;
+				read(fd, &enc, 1);
+				uint32_t data_len = fsize - 1;
+				char scratch[4096];
+
+				if (data_len < sizeof(scratch)) {
+					read(fd, scratch, data_len);
+					uint32_t d = 0;
+
+					/* TRCK / TPOS: numeric */
+					if (i == 6 || i == 7) {
+						char num[16] = {0};
+						uint32_t s = 0;
+						if (enc == 1 || enc == 2) s = (data_len >= 2) ? 2 : 0;
+						else if (data_len >= 3 && (uint8_t)scratch[0] == 0xEF) s = 3;
+						uint32_t nd = 0;
+						while (s < data_len && nd < 15 && scratch[s] != '/')
+							num[nd++] = scratch[s++];
+						if (i == 6) tags->track_num = atoi(num);
+						else        tags->disc_num  = atoi(num);
+						handled = 1;
+						break;
+					}
+
+					if (enc == 1 || enc == 2) {
+						/* UTF-16 → UTF-8 */
+						int be = (data_len >= 2 &&
+							(uint8_t)scratch[0] == 0xFE);
+						uint32_t s = (data_len >= 2 &&
+							((uint8_t)scratch[0] == 0xFF ||
+							 (uint8_t)scratch[0] == 0xFE))
+							? 2 : 0;
+						for (; s + 1 < data_len &&
+						       d < map[i].max; s += 2) {
+							uint16_t u = be ?
+								((uint8_t)scratch[s]<<8 |
+								 (uint8_t)scratch[s+1]) :
+								((uint8_t)scratch[s+1]<<8 |
+								 (uint8_t)scratch[s]);
+							if (u == 0) break;
+							if (u < 0x80)
+								map[i].dest[d++] = (char)u;
+							else if (u < 0x800) {
+								map[i].dest[d++] = 0xC0|(u>>6);
+								map[i].dest[d++] = 0x80|(u&0x3F);
+							} else {
+								map[i].dest[d++] = 0xE0|(u>>12);
+								map[i].dest[d++] = 0x80|((u>>6)&0x3F);
+								map[i].dest[d++] = 0x80|(u&0x3F);
+							}
+						}
+					} else {
+						/* UTF-8 / Latin-1 */
+						uint32_t s = (data_len >= 3 &&
+							(uint8_t)scratch[0] == 0xEF)
+							? 3 : 0;
+						while (s < data_len && d < map[i].max)
+							map[i].dest[d++] = scratch[s++];
+					}
+					map[i].dest[d] = '\0';
+				} else {
+					lseek(fd, data_len, SEEK_CUR);
+				}
+				handled = 1;
+				break;
+			}
+			if (!handled)
+				lseek(fd, fsize, SEEK_CUR);
+		}
+		lseek(fd, 10 + id3_size, SEEK_SET);
+	} else {
+		lseek(fd, 0, SEEK_SET);
+	}
+
+	/* scan for first MP3 sync frame */
+	char buf[8192];
+	ssize_t n = read(fd, buf, sizeof(buf));
+	if (n < 4) { close(fd); return 0; }
+
+	for (ssize_t i = 0; i < n - 4; i++) {
+		uint8_t *b = (uint8_t *)buf + i;
+		if (b[0] != 0xFF || (b[1] & 0xE0) != 0xE0) continue;
+
+		int ver    = (b[1] >> 3) & 0x03;
+		int lyr    = (b[1] >> 1) & 0x03;
+		int br_idx = (b[2] >> 4) & 0x0F;
+		int sr_idx = (b[2] >> 2) & 0x03;
+
+		if (ver == 1 || lyr == 0 || sr_idx == 3) continue;
+
+		static const uint32_t rates[4][3] = {
+			{11025,12000,8000}, {0},
+			{22050,24000,16000}, {44100,48000,32000}
+		};
+		si->sample_rate = rates[ver][sr_idx];
+		si->channels    = ((b[3] >> 6) == 3) ? 1 : 2;
+
+		/* check for Xing/Info VBR header */
+		size_t look = (i + 512 < n) ? 512 : (n - i - 4);
+		for (size_t j = 0; j < look; j++) {
+			if (memcmp(&b[j], "Xing", 4) == 0 ||
+			    memcmp(&b[j], "Info", 4) == 0) {
+				si->total_samples =
+					(uint64_t)mp3_decode_be(&b[j+8]) *
+					(ver == 3 ? 1152 : 576);
+				close(fd);
+				return 0;
+			}
+		}
+
+		/* CBR fallback */
+		if (br_idx > 0 && br_idx < 15) {
+			off_t cur = lseek(fd, 0, SEEK_CUR);
+			off_t fsz = lseek(fd, 0, SEEK_END);
+			lseek(fd, cur, SEEK_SET);
+
+			static const int br_table[2][16] = {
+				{0,8,16,24,32,40,48,56,
+				 64,80,96,112,128,144,160,0},
+				{0,32,40,48,56,64,80,96,
+				 112,128,160,192,224,256,320,0}
+			};
+			int bitrate = br_table[ver == 3][br_idx] * 1000;
+			if (bitrate > 0)
+				si->total_samples = (uint64_t)(
+					(double)(fsz - (10 + id3_size)) *
+					8.0 / bitrate * si->sample_rate);
+		}
+		close(fd);
+		return 0;
+	}
+
+	close(fd);
+	return -1;
 }
 
 static int parse_file(const char *path, const char *fmt,
@@ -642,6 +853,8 @@ static int parse_file(const char *path, const char *fmt,
 {
 	if (fmt[0] == 'f')
 		return parse_flac(path, si, tags);
+	if (fmt[0] == 'm')
+		return parse_mp3(path, si, tags);
 
 	uint8_t scratch[256];
 	int fd = open(path, O_RDONLY);
@@ -812,7 +1025,7 @@ static void usage(const char *prog)
 		"  %s -h              show this help\n"
 		"\n"
 		"Scan mode (default):\n"
-		"  Recursively scans <dir> for .flac and .wv files.\n"
+		"  Recursively scans <dir> for .flac, .wv, and .mp3 files.\n"
 		"  New files are parsed and inserted into the database.\n"
 		"  Files with unchanged inode+mtime are skipped (fast re-scan).\n"
 		"  Files with same inode but changed mtime are re-parsed.\n"
@@ -966,8 +1179,30 @@ static unsigned long hash_str(const char *s)
 	return h;
 }
 
-static int cache_cover(const char *src, const char *dst, int max_dim)
+static int cache_cover(const char *src, const char *dst, int max_dim,
+		       int *out_w, int *out_h)
 {
+	/* fast path: source is PNG that fits — symlink */
+	const char *dot = strrchr(src, '.');
+	if (dot && strcasecmp(dot, ".png") == 0) {
+		FILE *f = fopen(src, "rb");
+		if (f) {
+			unsigned char hdr[24];
+			if (fread(hdr, 1, 24, f) == 24) {
+				int pw = (hdr[16]<<24)|(hdr[17]<<16)|(hdr[18]<<8)|hdr[19];
+				int ph = (hdr[20]<<24)|(hdr[21]<<16)|(hdr[22]<<8)|hdr[23];
+				if (pw <= max_dim && ph <= max_dim) {
+					fclose(f);
+					symlink(src, dst);
+					*out_w = pw;
+					*out_h = ph;
+					return 0;
+				}
+			}
+			fclose(f);
+		}
+	}
+
 	int w, h, ch;
 	unsigned char *img = stbi_load(src, &w, &h, &ch, 3);
 	if (!img) {
@@ -980,8 +1215,19 @@ static int cache_cover(const char *src, const char *dst, int max_dim)
 		}
 		int status;
 		waitpid(pid, &status, 0);
-		return (WIFEXITED(status) && WEXITSTATUS(status) == 0)
-			? 0 : -1;
+		if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+			FILE *f = fopen(dst, "rb");
+			if (f) {
+				unsigned char hdr[24];
+				if (fread(hdr, 1, 24, f) == 24) {
+					*out_w = (hdr[16]<<24)|(hdr[17]<<16)|(hdr[18]<<8)|hdr[19];
+					*out_h = (hdr[20]<<24)|(hdr[21]<<16)|(hdr[22]<<8)|hdr[23];
+				}
+				fclose(f);
+			}
+			return 0;
+		}
+		return -1;
 	}
 
 	/* compute scaled dimensions */
@@ -1004,9 +1250,26 @@ static int cache_cover(const char *src, const char *dst, int max_dim)
 		out = img;
 	}
 
-	int ok = stbi_write_png(dst, nw, nh, 3, out, nw * 3);
+	FILE *fp = fopen(dst, "wb");
+	if (!fp) { free(out); return -1; }
+	png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING,
+						  NULL, NULL, NULL);
+	png_infop info = png_create_info_struct(png);
+	png_init_io(png, fp);
+	png_set_compression_level(png, 1);
+	png_set_IHDR(png, info, nw, nh, 8, PNG_COLOR_TYPE_RGB,
+		     PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
+		     PNG_FILTER_TYPE_DEFAULT);
+	png_write_info(png, info);
+	for (int y = 0; y < nh; y++)
+		png_write_row(png, out + y * nw * 3);
+	png_write_end(png, NULL);
+	png_destroy_write_struct(&png, &info);
+	fclose(fp);
 	free(out);
-	return ok ? 0 : -1;
+	*out_w = nw;
+	*out_h = nh;
+	return 0;
 }
 
 /* ---- threaded cache_cover worker ---- */
@@ -1014,6 +1277,7 @@ static int cache_cover(const char *src, const char *dst, int max_dim)
 struct cache_job {
 	char src[4096];
 	char dst[4096];
+	int  out_w, out_h;
 };
 
 static struct cache_job *g_jobs;
@@ -1027,7 +1291,8 @@ static void *cache_worker(void *arg)
 	for (;;) {
 		int i = g_next_job++;
 		if (i >= g_njobs) break;
-		cache_cover(g_jobs[i].src, g_jobs[i].dst, 1200);
+		cache_cover(g_jobs[i].src, g_jobs[i].dst, 1200,
+			    &g_jobs[i].out_w, &g_jobs[i].out_h);
 		g_done++;
 	}
 	return NULL;
@@ -1054,7 +1319,7 @@ static void build_image_cache(sqlite3 *db, const char *home)
 
 	sqlite3_stmt *upd;
 	sqlite3_prepare_v2(db,
-		"UPDATE tracks SET cover=?"
+		"UPDATE tracks SET cover=?, cover_w=?, cover_h=?"
 		" WHERE path >= ? || '/'"
 		" AND path < ? || '0';",  /* '0' is '/' + 1 in ASCII */
 		-1, &upd, NULL);
@@ -1084,7 +1349,8 @@ static void build_image_cache(sqlite3 *db, const char *home)
 					if (!dot) continue;
 					int is_flac = strcasecmp(dot, ".flac") == 0;
 					int is_wv = strcasecmp(dot, ".wv") == 0;
-					if (!is_flac && !is_wv) continue;
+					int is_mp3 = strcasecmp(dot, ".mp3") == 0;
+					if (!is_flac && !is_wv && !is_mp3) continue;
 
 					char audio[4096], out[4096];
 					snprintf(audio, sizeof(audio),
@@ -1104,6 +1370,11 @@ static void build_image_cache(sqlite3 *db, const char *home)
 							execlp("metaflac", "metaflac",
 							       "--export-picture-to",
 							       out, audio, NULL);
+						} else if (is_mp3) {
+							execlp("ffmpeg", "ffmpeg",
+							       "-i", audio,
+							       "-an", "-vcodec", "copy",
+							       "-y", out, NULL);
 						} else {
 							chdir(d);
 							execlp("wvtag", "wvtag",
@@ -1127,17 +1398,12 @@ static void build_image_cache(sqlite3 *db, const char *home)
 
 		/* compute cache path, update all tracks in this dir */
 		char cpath[4096] = "";
+		int cw = 0, ch = 0;
 		if (*cover)
 			snprintf(cpath, sizeof(cpath), "%s/%016lx.png",
 				 cache_dir, hash_str(cover));
 
-		sqlite3_reset(upd);
-		sqlite3_bind_text(upd, 1, cpath, -1, SQLITE_STATIC);
-		sqlite3_bind_text(upd, 2, d, -1, SQLITE_STATIC);
-		sqlite3_bind_text(upd, 3, d, -1, SQLITE_STATIC);
-		sqlite3_step(upd);
-
-		/* queue cache job if PNG doesn't exist yet */
+		/* queue cache job or read dims from existing cache */
 		if (*cpath) {
 			struct stat cst;
 			if (stat(cpath, &cst) != 0) {
@@ -1148,9 +1414,30 @@ static void build_image_cache(sqlite3 *db, const char *home)
 				}
 				strncpy(g_jobs[g_njobs].src, cover, 4095);
 				strncpy(g_jobs[g_njobs].dst, cpath, 4095);
+				g_jobs[g_njobs].out_w = 0;
+				g_jobs[g_njobs].out_h = 0;
 				g_njobs++;
+			} else {
+				/* already cached — read PNG header */
+				FILE *f = fopen(cpath, "rb");
+				if (f) {
+					unsigned char hdr[24];
+					if (fread(hdr, 1, 24, f) == 24) {
+						cw = (hdr[16]<<24)|(hdr[17]<<16)|(hdr[18]<<8)|hdr[19];
+						ch = (hdr[20]<<24)|(hdr[21]<<16)|(hdr[22]<<8)|hdr[23];
+					}
+					fclose(f);
+				}
 			}
 		}
+
+		sqlite3_reset(upd);
+		sqlite3_bind_text(upd, 1, cpath, -1, SQLITE_STATIC);
+		sqlite3_bind_int (upd, 2, cw);
+		sqlite3_bind_int (upd, 3, ch);
+		sqlite3_bind_text(upd, 4, d, -1, SQLITE_STATIC);
+		sqlite3_bind_text(upd, 5, d, -1, SQLITE_STATIC);
+		sqlite3_step(upd);
 	}
 	sqlite3_finalize(dirs);
 	sqlite3_finalize(upd);
@@ -1174,6 +1461,23 @@ static void build_image_cache(sqlite3 *db, const char *home)
 
 		free(tids);
 		printf("Cached %d images (%d threads)\n", g_njobs, nthreads);
+
+		/* update DB with dimensions from newly cached jobs */
+		sqlite3_stmt *dim_upd;
+		sqlite3_prepare_v2(db,
+			"UPDATE tracks SET cover_w=?, cover_h=? WHERE cover=?;",
+			-1, &dim_upd, NULL);
+		sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL);
+		for (int i = 0; i < g_njobs; i++) {
+			if (g_jobs[i].out_w <= 0) continue;
+			sqlite3_reset(dim_upd);
+			sqlite3_bind_int (dim_upd, 1, g_jobs[i].out_w);
+			sqlite3_bind_int (dim_upd, 2, g_jobs[i].out_h);
+			sqlite3_bind_text(dim_upd, 3, g_jobs[i].dst, -1, SQLITE_STATIC);
+			sqlite3_step(dim_upd);
+		}
+		sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+		sqlite3_finalize(dim_upd);
 	}
 	free(g_jobs);
 }

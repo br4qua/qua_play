@@ -1,0 +1,32 @@
+
+poc.c add mp3 path first check our db schema, then check how we parse in /home/free2/code/4-qua-audio-suites/qua-info/parse_mp3.h /home/free2/code/4-qua-audio-suites/qua-info/parse_mp3.c
+
+handle empty fields, no track , leave as blank and title becomes file name base name of the file in path, artist becomes __
+
+in our grouping i dont know if its possible to sort by aritst first in abc, but the date / year is newest first. skip if this is convlulted.
+
+cusor highlight should be terminal green instead of magenta its not very visible right now. 
+
+jump function, currently have the a key that goes to album, but we can also jump to gr for jump , we should also support other fp for filtering only the path if user wants something specfic, fa or filtering by album? s to stop, clicking escape shouldnt quit the program only q should quit the program
+
+---
+this might be a lot of to implement above. maybe we just let the right click onn the info panel, on artist , album or AlbumArt, we let them jump to their respective fiels there, and also genre? maybe even the path and subpath? like they can jump a few folders up? this is kinda interesting right?
+
+maybe page up and down should let them jump to first item of the previous and next grouping?
+
+
+
+add dash between date and the album in the groupinng bar
+
+right clicking on the album grouping should jump to the album or something.
+is it possible to maintain correct cursor positing during an album jump?
+
+
+bug sometimes there are some random character flying off to where they should not be, maybe its because are doing the math wrong? but i am mostly seeing this on japanese text onces
+
+bug in ui, when the cursor is on the very top, the grouping gets pushed off, we can never see its grouping again. in general if we are in a long album, the grouping easily get pushed off, i think we should handle those cases and kinda of float the grouping over our data row, qmmp has such a behavior but you shouldnt check its code base since its large.
+
+symlink back end, the entire visible playlist should be symlinked to a place in a folder in /temp/qu-tui/ (which ever is most likely in ram) , this way when we call qua-play-this, it doesnt do it by folder, but it does it by THAT folder which represents our playlist. this is useful because qua-play-this talks to my daemon which "finds" the next file in the same folder in this manner we emulate a new "folder" or do you have a better suggestion? let me dwell on this.
+
+
+maybe we should highlight the grouping in which we are under

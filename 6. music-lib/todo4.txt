@@ -1,0 +1,12 @@
+control o should be just o 
+
+some werid behavior on searching and hitting enter, when hitting enter during a search, we should not be able to to play a song it should just lock in the search term on the bottom, and once filtering/searching for /term and hitting enter it should say [filter:term] instead of just term. the | /:search ESC: clear should also have other keys here like o for open, p for play s for stop. etc
+
+pressing right button on song should play it
+pressing pressing p should play it
+pressing s should call qua-stop
+
+some general things, there is some back fill path for if an image doesnt exsist. but we will call those repeatedly and the scrolling becomes super slow. we should not attempt to find if the thing has failed already. we should define a path for no image and it should be hard coded. its here at no-art.png
+
+you see how we have album artist being clickable? we should do for artist as well, but if its like comma seperated we remove that comma. additional those clickables mapping terms should be copy to your x11 or wayland clipboard.
+and additionally, whole row on the info panel should be right clickable like if not already

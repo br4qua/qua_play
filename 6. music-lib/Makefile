@@ -8,6 +8,8 @@ PREFIX = /usr/local
 
 TUI = qua-music-tui
 TUI_SRCS = tui.c
+TUI_CFLAGS = $(CFLAGS)
+TUI_LDFLAGS = $(LDFLAGS)
 TUI_LIBS = -lsqlite3 -lncursesw -lm -lpthread
 
 all: $(TARGET) $(TUI)
@@ -17,7 +19,7 @@ $(TARGET): $(SRCS)
 	@echo "Build complete: ./$(TARGET)"
 
 $(TUI): $(TUI_SRCS)
-	$(CC) $(CFLAGS) $(TUI_SRCS) -o $(TUI) $(LDFLAGS) $(TUI_LIBS)
+	$(CC) $(TUI_CFLAGS) $(TUI_SRCS) -o $(TUI) $(TUI_LDFLAGS) $(TUI_LIBS)
 	@echo "Build complete: ./$(TUI)"
 
 install: $(TARGET) $(TUI)

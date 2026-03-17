@@ -131,6 +131,7 @@ static int         sort_col = 3;   /* default: sort by album, -1=unsorted */
 static int         sort_asc = 1;   /* 1=ASC, 0=DESC */
 static char        filter_col[32];    /* db column to filter, empty=off */
 static char        filter_val[256];  /* exact value to match */
+static char        filter_part_bufs[16][260];  /* artist OR parts — file scope for LTO */
 /* info panel right-click targets (y range → db column + value) */
 #define INFO_CLICK_MAX 6
 #define INFO_PAD_ROWS  64
@@ -145,6 +146,9 @@ static int info_height;
 static int info_div_y;
 static int info_visible;
 static int last_info_selected = -1;
+/* info pad: prefresh must run after refresh() or stdscr overwrites it */
+static WINDOW *info_pad;
+static int info_pad_sminrow, info_pad_smincol, info_pad_smaxrow, info_pad_smaxcol;
 static volatile sig_atomic_t got_sigcont;
 static void handle_sigcont(int sig) { (void)sig; got_sigcont = 1; }
 
@@ -356,14 +360,80 @@ static void rebuild_view(void)
 			sqlite3_bind_text(st, 1, match, -1, SQLITE_TRANSIENT);
 		}
 	} else if (filter_col[0]) {
-		/* column filter: LIKE for path (contains %), = otherwise */
-		const char *op = strchr(filter_val, '%') ? "LIKE" : "=";
-		snprintf(sql, sizeof(sql),
-			 "SELECT rowid FROM tracks"
-			 " WHERE %s %s ?%s;", filter_col, op, order);
-		if (sqlite3_prepare_v2(mem_db, sql, -1, &st, NULL) != SQLITE_OK)
-			return;
-		sqlite3_bind_text(st, 1, filter_val, -1, SQLITE_STATIC);
+		/* artist/album_artist: OR match when multiple (find tracks with any) */
+		int use_or = (strcmp(filter_col, "artist") == 0 ||
+			      strcmp(filter_col, "album_artist") == 0) &&
+			     (strchr(filter_val, ',') || strstr(filter_val, " / ") ||
+			      strstr(filter_val, " & ") || strchr(filter_val, ';'));
+		if (use_or) {
+			char fcopy[256];
+			strncpy(fcopy, filter_val, sizeof(fcopy) - 1);
+			fcopy[sizeof(fcopy) - 1] = '\0';
+			/* normalize separators: " / ", " & ", ";" -> "," */
+			for (char *c = fcopy; *c; c++) {
+				if (c[0] == ' ' && c[1] == '/' && c[2] == ' ') { c[0] = ','; c[1] = ' '; c[2] = ' '; }
+				else if (c[0] == ' ' && c[1] == '&' && c[2] == ' ') { c[0] = ','; c[1] = ' '; c[2] = ' '; }
+				else if (c[0] == ';') *c = ',';
+			}
+			const char *parts[16];
+			int nparts = 0;
+			for (char *tok = strtok(fcopy, ","); tok && nparts < 16;
+			     tok = strtok(NULL, ",")) {
+				while (*tok == ' ') tok++;
+				char *end = tok + strlen(tok);
+				while (end > tok && end[-1] == ' ') end--;
+				*end = '\0';
+				if (!*tok) continue;
+				parts[nparts++] = tok;
+			}
+			/* need persistent storage for parts — they point into fcopy modified by strtok */
+			for (int i = 0; i < nparts && i < 16; i++) {
+				strncpy(filter_part_bufs[i], parts[i], sizeof(filter_part_bufs[0]) - 1);
+				filter_part_bufs[i][sizeof(filter_part_bufs[0]) - 1] = '\0';
+				parts[i] = filter_part_bufs[i];
+			}
+			if (nparts > 0) {
+				char wh[640], full_sql[896];
+				size_t wh_rem;
+				char *p = wh;
+				p += snprintf(p, sizeof(wh), " WHERE (");
+				for (int i = 0; i < nparts; i++) {
+					wh_rem = (size_t)(sizeof(wh) - (p - wh));
+					if (wh_rem < 48) break;
+					if (i) p += snprintf(p, wh_rem, " OR ");
+					wh_rem = (size_t)(sizeof(wh) - (p - wh));
+					if (wh_rem < 48) break;
+					/* exact match (case-insensitive) — not substring */
+					p += snprintf(p, wh_rem, "LOWER(%s) = LOWER(?)", filter_col);
+				}
+				wh_rem = (size_t)(sizeof(wh) - (p - wh));
+				snprintf(p, wh_rem, " OR %s = ?)%s;", filter_col, order);
+				snprintf(full_sql, sizeof(full_sql), "SELECT rowid FROM tracks%s", wh);
+				if (getenv("QUA_DEBUG_FILTER")) {
+					fprintf(stderr, "qua-tui filter: %s\n", full_sql);
+					for (int i = 0; i < nparts; i++)
+						fprintf(stderr, "  ?%d = '%s'\n", i+1, parts[i]);
+					fprintf(stderr, "  ?%d = '%s'\n", nparts+1, filter_val);
+				}
+				if (sqlite3_prepare_v2(mem_db, full_sql, -1, &st, NULL) != SQLITE_OK)
+					return;
+				for (int i = 0; i < nparts; i++)
+					sqlite3_bind_text(st, i + 1, parts[i], -1, SQLITE_STATIC);
+				sqlite3_bind_text(st, nparts + 1, filter_val, -1, SQLITE_STATIC);
+			} else {
+				use_or = 0;
+			}
+		}
+		if (!use_or) {
+			/* LIKE for path (contains %), = otherwise */
+			const char *op = strchr(filter_val, '%') ? "LIKE" : "=";
+			snprintf(sql, sizeof(sql),
+				 "SELECT rowid FROM tracks"
+				 " WHERE %s %s ?%s;", filter_col, op, order);
+			if (sqlite3_prepare_v2(mem_db, sql, -1, &st, NULL) != SQLITE_OK)
+				return;
+			sqlite3_bind_text(st, 1, filter_val, -1, SQLITE_STATIC);
+		}
 	} else {
 		snprintf(sql, sizeof(sql),
 			 "SELECT rowid FROM tracks%s;", order);
@@ -428,6 +498,9 @@ static void rebuild_view(void)
 
 static int next_track(int from)
 {
+	if (nview == 0) return -1;
+	if (from >= nview) from = nview - 1;
+	if (from < 0) from = 0;
 	for (int i = from + 1; i < nview; i++)
 		if (view[i].type == VIEW_TRACK) return i;
 	return from;
@@ -435,6 +508,9 @@ static int next_track(int from)
 
 static int prev_track(int from)
 {
+	if (nview == 0) return -1;
+	if (from >= nview) from = nview - 1;
+	if (from < 0) return -1;
 	for (int i = from - 1; i >= 0; i--)
 		if (view[i].type == VIEW_TRACK) return i;
 	return from;
@@ -450,6 +526,8 @@ static int first_track(void)
 static int next_group(int from, int page_size)
 {
 	if (nview == 0) return -1;
+	if (from >= nview) from = nview - 1;
+	if (from < 0) from = 0;
 	/* find the next header after current position, return its first track */
 	for (int i = from + 1; i < nview; i++)
 		if (view[i].type == VIEW_HEADER)
@@ -463,6 +541,8 @@ static int next_group(int from, int page_size)
 static int prev_group(int from, int page_size)
 {
 	if (nview == 0) return -1;
+	if (from >= nview) from = nview - 1;
+	if (from < 0) return -1;
 	/* find header of current group, then go to the one before it */
 	int cur_hdr = -1;
 	for (int i = from; i >= 0; i--)
@@ -489,7 +569,9 @@ static void play_track(int view_idx)
 {
 	if (view_idx < 0 || view_idx >= nview) return;
 	if (view[view_idx].type != VIEW_TRACK) return;
-	const char *path = tracks[view[view_idx].track_idx].path;
+	int idx = view[view_idx].track_idx;
+	if (idx < 0 || idx >= ntracks) return;
+	const char *path = tracks[idx].path;
 	pid_t pid = fork();
 	if (pid == 0) { execlp("qua-play-this", "qua-play-this", path, NULL); _exit(1); }
 }
@@ -503,8 +585,11 @@ static void save_state(int selected, int top)
 	if (!disk_db) return;
 	const char *path = "";
 	if (selected >= 0 && selected < nview &&
-	    view[selected].type == VIEW_TRACK)
-		path = tracks[view[selected].track_idx].path;
+	    view[selected].type == VIEW_TRACK) {
+		int idx = view[selected].track_idx;
+		if (idx >= 0 && idx < ntracks)
+			path = tracks[idx].path;
+	}
 
 	char sc[8], sa[8], st_top[16];
 	snprintf(sc, sizeof(sc), "%d", sort_col);
@@ -566,11 +651,14 @@ static void load_state(int *out_top)
 
 static int find_saved_track(void)
 {
-	if (*saved_sel_path) {
+	if (*saved_sel_path && view && tracks) {
 		for (int i = 0; i < nview; i++) {
-			if (view[i].type == VIEW_TRACK &&
-			    strcmp(tracks[view[i].track_idx].path, saved_sel_path) == 0)
-				return i;
+			if (view[i].type == VIEW_TRACK) {
+				int idx = view[i].track_idx;
+				if (idx >= 0 && idx < ntracks &&
+				    strcmp(tracks[idx].path, saved_sel_path) == 0)
+					return i;
+			}
 		}
 	}
 	return first_track();
@@ -920,6 +1008,8 @@ static void render_track_list(int top, int selected, int list_x, int list_w, int
 				else
 					print_field(buf, widths[c]);
 			}
+			if (getcurx(stdscr) < list_x)
+				move(getcury(stdscr), list_x);
 			for (int x = getcurx(stdscr); x < list_x + list_w; x++) addch(' ');
 			if (idx == selected)
 				attroff(COLOR_PAIR(2) | A_BOLD);
@@ -1072,7 +1162,7 @@ static void get_cell_size(int *cw, int *ch)
 {
 	struct winsize ws;
 	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 &&
-	    ws.ws_xpixel > 0 && ws.ws_col > 0) {
+	    ws.ws_xpixel > 0 && ws.ws_col > 0 && ws.ws_row > 0) {
 		*cw = ws.ws_xpixel / ws.ws_col;
 		*ch = ws.ws_ypixel / ws.ws_row;
 	} else {
@@ -1080,17 +1170,21 @@ static void get_cell_size(int *cw, int *ch)
 	}
 }
 
+#define MIN_INFO_ROWS 10  /* reserve rows for scrollable info panel */
+
 static void art_area_dim(int rw, int rows_h, int *out_aw, int *out_split)
 {
 	int cw, ch;
 	get_cell_size(&cw, &ch);
-	int max_aw = rw > 6 ? rw - 6 : rw;
-	int max_h = rows_h > 1 ? rows_h - 1 : 1;  /* reserve 1 for Info divider */
-	/* largest square that fits: aw*cell_w = split*cell_h */
+	int max_aw = rw;
+	/* reserve Info bar + minimum info rows; art gets the rest */
+	int max_art_h = rows_h - 1 - MIN_INFO_ROWS;  /* 1 for Info divider */
+	if (max_art_h < 1) max_art_h = 1;
+	/* largest square that fits within max_art_h */
 	int aw_by_w = max_aw, split_by_w = (aw_by_w * cw) / ch;
-	int aw_by_h = (max_h * ch) / cw, split_by_h = max_h;
+	int aw_by_h = (max_art_h * ch) / cw, split_by_h = max_art_h;
 	int aw, split;
-	if (split_by_w <= max_h) {
+	if (split_by_w <= max_art_h) {
 		aw = aw_by_w;
 		split = split_by_w;
 	} else {
@@ -1098,6 +1192,9 @@ static void art_area_dim(int rw, int rows_h, int *out_aw, int *out_split)
 		split = aw_by_h <= max_aw ? split_by_h : (max_aw * cw) / ch;
 	}
 	if (aw < 1) aw = 1;
+	if (split < 1) split = 1;
+	if (split > rows_h - 1 - MIN_INFO_ROWS)
+		split = rows_h - 1 - MIN_INFO_ROWS;
 	if (split < 1) split = 1;
 	*out_aw = aw;
 	*out_split = split;
@@ -1126,14 +1223,18 @@ static void render_sidebar(int selected, int side_x, int side_w, int rows_h)
 	attroff(COLOR_PAIR(3) | A_BOLD);
 	for (int x = aw; x < aw; x++) addch(' ');  /* no extension needed */
 
-	/* -- Info panel (bottom) — draw directly to stdscr -- */
+	/* -- Info panel (bottom) — scrollable pad -- */
 	info_div_y = div_y;
 	info_visible = rows_h - div_y - 1;
+	info_height = 0;
 	n_info_click = 0;
 	track_t *t = NULL;
 	if (selected >= 0 && selected < nview &&
-	    view[selected].type == VIEW_TRACK)
-		t = &tracks[view[selected].track_idx];
+	    view[selected].type == VIEW_TRACK) {
+		int idx = view[selected].track_idx;
+		if (idx >= 0 && idx < ntracks)
+			t = &tracks[idx];
+	}
 	char dur[16] = "", hz[16] = "", bd[16] = "";
 	const char *fmt = "";
 	if (t) {
@@ -1145,63 +1246,53 @@ static void render_sidebar(int selected, int side_x, int side_w, int rows_h)
 		      strcmp(t->format,"flac")   ==0 ? "FLAC"    : t->format;
 	}
 
-	/* clear info area */
-	for (int y = div_y + 1; y < rows_h; y++) {
-		move(y, side_x);
-		for (int x = 0; x < aw; x++) addch(' ');
-	}
+	info_pad = NULL;
+	WINDOW *ipad = newpad(INFO_PAD_ROWS, aw);
+	if (ipad) {
+		wbkgd(ipad, 0);
+		werase(ipad);
+		int y = 0, h;
+		y += info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "Title",     t && t->title[0] ? t->title : "");
+		h = info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "Artist",    t ? t->artist : "");
+		if (h > 0 && t) { info_click[n_info_click] = (typeof(info_click[0])){"artist", "", y, y+h}; strncpy(info_click[n_info_click].val, t->artist, 255); n_info_click++; }
+		y += h;
+		h = info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "Album",     t ? t->album : "");
+		if (h > 0 && t) { info_click[n_info_click] = (typeof(info_click[0])){"album", "", y, y+h}; strncpy(info_click[n_info_click].val, t->album, 255); n_info_click++; }
+		y += h;
+		h = info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "AlbumArt",  t ? t->album_artist : "");
+		if (h > 0 && t) { info_click[n_info_click] = (typeof(info_click[0])){"album_artist", "", y, y+h}; strncpy(info_click[n_info_click].val, t->album_artist, 255); n_info_click++; }
+		y += h;
+		if (t && t->track_num > 0) {
+			char tn[8]; snprintf(tn, sizeof(tn), "%d", t->track_num);
+			y += info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "Track",   tn);
+		}
+		y += info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "Duration", dur);
+		y += info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "Format",   fmt);
+		y += info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "Rate",     hz);
+		y += info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "Depth",    bd);
+		y += info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "Date",     t ? t->date : "");
+		h = info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "Genre",    t ? t->genre : "");
+		if (h > 0 && t) { info_click[n_info_click] = (typeof(info_click[0])){"genre", "", y, y+h}; strncpy(info_click[n_info_click].val, t->genre, 255); n_info_click++; }
+		y += h;
+		h = info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "Path",     t ? t->path : "");
+		if (h > 0 && t) { info_click[n_info_click] = (typeof(info_click[0])){"path", "", y, y+h}; strncpy(info_click[n_info_click].val, t->path, sizeof(info_click[0].val)-1); n_info_click++; }
+		y += h;
+		h = info_line_pad(ipad, y, 1, aw - 1, INFO_PAD_ROWS, "MD5",      t ? t->audiomd5 : "");
+		if (h > 0 && t && n_info_click < INFO_CLICK_MAX) { info_click[n_info_click] = (typeof(info_click[0])){"audiomd5", "", y, y+h}; strncpy(info_click[n_info_click].val, t->audiomd5, 255); n_info_click++; }
+		y += h;
+		info_height = y;
 
-	int sy = div_y + 1;
-	int max_sy = rows_h - 1;
-	int h;
-	h = info_line(sy, side_x + 1, aw - 1, "Title",     t && t->title[0] ? t->title : "");
-	if (h > 0 && t) { info_click[n_info_click] = (typeof(info_click[0])){"title", "", sy - div_y - 1, sy - div_y - 1 + h}; strncpy(info_click[n_info_click].val, t->title, 255); n_info_click++; }
-	sy += h;
-	if (sy <= max_sy) {
-		h = info_line(sy, side_x + 1, aw - 1, "Artist",    t ? t->artist : "");
-		if (h > 0 && t) { info_click[n_info_click] = (typeof(info_click[0])){"artist", "", sy - div_y - 1, sy - div_y - 1 + h}; strncpy(info_click[n_info_click].val, t->artist, 255); n_info_click++; }
-		sy += h;
+		if (info_scroll > info_height - info_visible && info_height > info_visible)
+			info_scroll = info_height - info_visible;
+		if (info_scroll < 0) info_scroll = 0;
+
+		/* defer prefresh until after refresh() — otherwise refresh overwrites pad */
+		info_pad = ipad;
+		info_pad_sminrow = div_y + 1;
+		info_pad_smincol = side_x;
+		info_pad_smaxrow = rows_h - 1;
+		info_pad_smaxcol = side_x + aw - 1;
 	}
-	if (sy <= max_sy) {
-		h = info_line(sy, side_x + 1, aw - 1, "Album",     t ? t->album : "");
-		if (h > 0 && t) { info_click[n_info_click] = (typeof(info_click[0])){"album", "", sy - div_y - 1, sy - div_y - 1 + h}; strncpy(info_click[n_info_click].val, t->album, 255); n_info_click++; }
-		sy += h;
-	}
-	if (sy <= max_sy) {
-		h = info_line(sy, side_x + 1, aw - 1, "AlbumArt",  t ? t->album_artist : "");
-		if (h > 0 && t) { info_click[n_info_click] = (typeof(info_click[0])){"album_artist", "", sy - div_y - 1, sy - div_y - 1 + h}; strncpy(info_click[n_info_click].val, t->album_artist, 255); n_info_click++; }
-		sy += h;
-	}
-	if (sy <= max_sy && t && t->track_num > 0) {
-		char tn[8]; snprintf(tn, sizeof(tn), "%d", t->track_num);
-		sy += info_line(sy, side_x + 1, aw - 1, "Track",   tn);
-	}
-	if (sy <= max_sy)
-		sy += info_line(sy, side_x + 1, aw - 1, "Duration", dur);
-	if (sy <= max_sy)
-		sy += info_line(sy, side_x + 1, aw - 1, "Format",   fmt);
-	if (sy <= max_sy)
-		sy += info_line(sy, side_x + 1, aw - 1, "Rate",     hz);
-	if (sy <= max_sy)
-		sy += info_line(sy, side_x + 1, aw - 1, "Depth",    bd);
-	if (sy <= max_sy)
-		sy += info_line(sy, side_x + 1, aw - 1, "Date",     t ? t->date : "");
-	if (sy <= max_sy) {
-		h = info_line(sy, side_x + 1, aw - 1, "Genre",     t ? t->genre : "");
-		if (h > 0 && t) { info_click[n_info_click] = (typeof(info_click[0])){"genre", "", sy - div_y - 1, sy - div_y - 1 + h}; strncpy(info_click[n_info_click].val, t->genre, 255); n_info_click++; }
-		sy += h;
-	}
-	if (sy <= max_sy) {
-		h = info_line(sy, side_x + 1, aw - 1, "Path",      t ? t->path : "");
-		if (h > 0 && t) { info_click[n_info_click] = (typeof(info_click[0])){"path", "", sy - div_y - 1, sy - div_y - 1 + h}; strncpy(info_click[n_info_click].val, t->path, sizeof(info_click[0].val)-1); n_info_click++; }
-		sy += h;
-	}
-	if (sy <= max_sy) {
-		h = info_line(sy, side_x + 1, aw - 1, "MD5",       t ? t->audiomd5 : "");
-		if (h > 0 && t && n_info_click < INFO_CLICK_MAX) { info_click[n_info_click] = (typeof(info_click[0])){"audiomd5", "", sy - div_y - 1, sy - div_y - 1 + h}; strncpy(info_click[n_info_click].val, t->audiomd5, 255); n_info_click++; }
-		sy += h;
-	}
-	info_height = sy - div_y - 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1517,6 +1608,15 @@ static void render(int top, int selected)
 
 	refresh();
 
+	/* prefresh info pad after refresh — stdscr would overwrite it otherwise */
+	if (info_pad) {
+		prefresh(info_pad, info_scroll, 0,
+			 info_pad_sminrow, info_pad_smincol,
+			 info_pad_smaxrow, info_pad_smaxcol);
+		delwin(info_pad);
+		info_pad = NULL;
+	}
+
 	/* kitty: album art after ncurses flush */
 	static int  art_cols;     /* actual cols image occupies */
 	static int  art_rows;     /* actual rows image occupies */
@@ -1535,38 +1635,41 @@ static void render(int top, int selected)
 		int db_cw = 0, db_ch = 0;
 		if (selected >= 0 && selected < nview &&
 		    view[selected].type == VIEW_TRACK) {
-			track_t *t = &tracks[view[selected].track_idx];
-			if (*t->cover) {
-				strncpy(resolved, t->cover,
-					sizeof(resolved) - 1);
-				db_cw = t->cover_w;
-				db_ch = t->cover_h;
-			} else {
-				/* fallback: scan + cache on the fly */
-				path_dir(t->path, dir, sizeof(dir));
-				if (*dir && strcmp(dir, last_art_dir) != 0) {
-					char src[PATH_MAX] = "";
-					find_cover_art(dir, src, sizeof(src));
-					if (*src) {
-						get_cache_path(src, resolved,
-							sizeof(resolved));
-						struct stat cst;
-						if (stat(resolved, &cst) != 0)
-							magick_cache(src,
-								resolved);
-					} else {
-						strncpy(resolved, no_art_path,
+			int idx = view[selected].track_idx;
+			if (idx >= 0 && idx < ntracks) {
+				track_t *t = &tracks[idx];
+				if (*t->cover) {
+					strncpy(resolved, t->cover,
+						sizeof(resolved) - 1);
+					db_cw = t->cover_w;
+					db_ch = t->cover_h;
+				} else {
+					/* fallback: scan + cache on the fly */
+					path_dir(t->path, dir, sizeof(dir));
+					if (*dir && strcmp(dir, last_art_dir) != 0) {
+						char src[PATH_MAX] = "";
+						find_cover_art(dir, src, sizeof(src));
+						if (*src) {
+							get_cache_path(src, resolved,
+								sizeof(resolved));
+							struct stat cst;
+							if (stat(resolved, &cst) != 0)
+								magick_cache(src,
+									resolved);
+							else
+								strncpy(resolved, no_art_path,
+									sizeof(resolved) - 1);
+						}
+						strncpy(last_art_val, resolved,
+							sizeof(last_art_val) - 1);
+						last_art_val[sizeof(last_art_val) - 1] = '\0';
+					} else if (*dir) {
+						strncpy(resolved, last_art_val,
 							sizeof(resolved) - 1);
 					}
-					strncpy(last_art_val, resolved,
-						sizeof(last_art_val) - 1);
-					last_art_val[sizeof(last_art_val) - 1] = '\0';
-				} else if (*dir) {
-					strncpy(resolved, last_art_val,
-						sizeof(resolved) - 1);
+					strncpy(last_art_dir, dir,
+						sizeof(last_art_dir) - 1);
 				}
-				strncpy(last_art_dir, dir,
-					sizeof(last_art_dir) - 1);
 			}
 		}
 
@@ -1580,6 +1683,8 @@ static void render(int top, int selected)
 
 			/* transmit new image (old still visible) */
 			if (*cur_art_path) {
+				/* Cover art sizing: aspect-ratio + centering is intentional, not a bug.
+				 * Do not change without explicit user request. */
 				int iw = db_cw, ih = db_ch;
 				art_cols = aw;
 				art_rows = art_h;
@@ -1597,17 +1702,17 @@ static void render(int top, int selected)
 						s = (double)area_ph / ih;
 					int disp_pw = (int)(iw * s);
 					int disp_ph = (int)(ih * s);
-					/* round up to minimize gap from truncation */
 					art_cols = (disp_pw + cw - 1) / cw;
 					art_rows = (disp_ph + ch - 1) / ch;
 					if (art_cols < 1) art_cols = 1;
 					if (art_cols > aw) art_cols = aw;
 					if (art_rows < 1) art_rows = 1;
 					if (art_rows > art_h) art_rows = art_h;
-					kitty_transmit_png(cur_art_path);
 				}
-				/* place new on top, then delete old */
-				kitty_place(art_y, 0, art_cols, art_rows);
+				kitty_transmit_png(cur_art_path);
+				/* place new on top, then delete old (center when narrower than aw) */
+				int art_x = art_cols < aw ? (aw - art_cols) / 2 : 0;
+				kitty_place(art_y, art_x, art_cols, art_rows);
 				if (had_old)
 					kitty_delete(old_id);
 			} else {
@@ -1618,8 +1723,10 @@ static void render(int top, int selected)
 		}
 
 		/* re-place every frame for stability */
-		if (*cur_art_path)
-			kitty_place(art_y, 0, art_cols, art_rows);
+		if (*cur_art_path) {
+			int art_x = art_cols < aw ? (aw - art_cols) / 2 : 0;
+			kitty_place(art_y, art_x, art_cols, art_rows);
+		}
 
 		/* restore cursor for ncurses */
 		write(STDOUT_FILENO, "\0338", 2);
@@ -1781,7 +1888,7 @@ int main(int argc, char *argv[])
 			/* interrupted by signal (SIGCONT) */
 			if (got_sigcont) {
 				got_sigcont = 0;
-				clearok(curscr, TRUE);
+				clearok(stdscr, TRUE);
 				cur_art_path[0] = '\0';
 				render(top, selected);
 			}
@@ -1808,9 +1915,9 @@ int main(int argc, char *argv[])
 							info_scroll = info_scroll + 3 < max_scroll ? info_scroll + 3 : max_scroll;
 						dirty = 1;
 					}
-				} else if (ev.bstate & BUTTON4_PRESSED)
+				} else if (ev.x >= aaw && (ev.bstate & BUTTON4_PRESSED))
 					selected = prev_track(selected);
-				else if (ev.bstate & BUTTON5_PRESSED)
+				else if (ev.x >= aaw && (ev.bstate & BUTTON5_PRESSED))
 					selected = next_track(selected);
 				else if (ev.y == 0 &&
 				 (ev.bstate & BUTTON1_CLICKED) && ev.x >= aaw) {
@@ -1973,12 +2080,6 @@ int main(int argc, char *argv[])
 							} else {
 								strncpy(filter_col, info_click[i].db_col, sizeof(filter_col)-1);
 								strncpy(filter_val, info_click[i].val, sizeof(filter_val)-1);
-								/* replace commas with spaces for artist fields */
-								if (strcmp(info_click[i].db_col, "artist") == 0 ||
-								    strcmp(info_click[i].db_col, "album_artist") == 0) {
-									for (char *c = filter_val; *c; c++)
-										if (*c == ',') *c = ' ';
-								}
 							}
 							copy_to_clipboard(filter_val);
 							query_buf[0] = '\0';
@@ -2079,10 +2180,12 @@ int main(int argc, char *argv[])
 			}
 			case KEY_RESIZE:
 				kitty_delete_all();
-				clear();
+				resize_term(LINES, COLS);
+				clearok(stdscr, TRUE);
 				rows_h = LINES - 2;
 				cur_art_path[0] = '\0';
 				dirty = 1;
+				render(top, selected);
 				break;
 			default:
 				if (ch >= 32 && ch < 127) {
@@ -2229,10 +2332,12 @@ int main(int argc, char *argv[])
 			case KEY_END:  selected = last_track();  break;
 			case KEY_RESIZE:
 				kitty_delete_all();
-				clear();
+				resize_term(LINES, COLS);
+				clearok(stdscr, TRUE);
 				rows_h = LINES - 2;
 				cur_art_path[0] = '\0';
 				dirty = 1;
+				render(top, selected);
 				break;
 			default: break;
 			}

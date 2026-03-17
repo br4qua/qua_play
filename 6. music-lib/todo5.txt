@@ -1,0 +1,6 @@
+search refinements, when clicking on path in the info panel. the search should be on that path, but it should be sorted 
+
+ui refinement, where there are no result, the info panel shouldnt lose Title artist ablumb art track fields.
+
+
+pressing control z , then fg loses the view port , why is this?

@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -O2 -march=native -mtune=native -flto -Wall -std=c23
+CFLAGS = -O2 -g -march=native -mtune=native -flto -Wall -std=c23
 LDFLAGS = -flto
 LIBS = -lsqlite3 -lpng -lz -lm -lpthread
 TARGET = qua-music-lib
@@ -8,7 +8,7 @@ PREFIX = /usr/local
 
 TUI = qua-music-tui
 TUI_SRCS = tui.c
-TUI_LIBS = -lsqlite3 -lncursesw -lm
+TUI_LIBS = -lsqlite3 -lncursesw -lm -lpthread
 
 all: $(TARGET) $(TUI)
 

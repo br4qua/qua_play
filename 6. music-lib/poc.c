@@ -878,6 +878,7 @@ typedef struct {
 } scan_stats_t;
 
 static int g_debug;
+static int g_force;
 
 static void scan_dir(sqlite3 *db, hmap_t *m, const char *dirpath,
                       scan_stats_t *stats)
@@ -927,7 +928,7 @@ static void scan_dir(sqlite3 *db, hmap_t *m, const char *dirpath,
 		hmap_slot_t *slot = hmap_find(m, dev, ino);
 		if (slot) {
 			slot->visited = 1;
-			if (slot->mtime == mtime) {
+			if (!g_force && slot->mtime == mtime) {
 				/* Same content — check if path changed */
 				if (slot->path && strcmp(slot->path, path) != 0) {
 					if (g_debug)
@@ -940,7 +941,7 @@ static void scan_dir(sqlite3 *db, hmap_t *m, const char *dirpath,
 				}
 				continue;
 			}
-			/* mtime changed — re-parse */
+			/* mtime changed or -f: re-parse */
 			stats->updated++;
 		} else {
 			if (g_debug)
@@ -1018,11 +1019,13 @@ static void usage(const char *prog)
 {
 	fprintf(stderr,
 		"Usage:\n"
-		"  %s <dir> [db]      scan and index directory\n"
-		"  %s -a <dir> [db]   add/update entries (same as above)\n"
-		"  %s -c [db]         remove stale entries (files deleted from disk)\n"
-		"  %s -i [db]         build cover art PNG cache\n"
-		"  %s -h              show this help\n"
+		"  %s <dir>     scan and index directory\n"
+		"  %s -a <dir>  add/update entries (same as above)\n"
+		"  %s -c        remove stale entries (files deleted from disk)\n"
+		"  %s -i [path] build cover art PNG cache (file/dir or all)\n"
+		"  %s -m        compute audio MD5 for tracks missing it (scan mode)\n"
+		"  %s -f        force rescan (skip dev/ino/mtime check; re-cache album art)\n"
+		"  %s -h        show this help\n"
 		"\n"
 		"Scan mode (default):\n"
 		"  Recursively scans <dir> for .flac, .wv, and .mp3 files.\n"
@@ -1036,13 +1039,13 @@ static void usage(const char *prog)
 		"  Removes entries whose files no longer exist or whose\n"
 		"  path now points to a different file (dev:ino mismatch).\n"
 		"\n"
-		"Database defaults to ~/.config/qua-player/music.db\n"
+		"Database: ~/.config/qua-player/music.db\n"
 		"\n"
 		"Examples:\n"
 		"  %s /mnt/music\n"
-		"  %s -a /mnt/more-music library.db\n"
-		"  %s -c library.db\n",
-		prog, prog, prog, prog, prog, prog, prog, prog);
+		"  %s -a /mnt/more-music\n"
+		"  %s -c\n",
+		prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1298,19 +1301,186 @@ static void *cache_worker(void *arg)
 	return NULL;
 }
 
-static void build_image_cache(sqlite3 *db, const char *home)
+/* ------------------------------------------------------------------ */
+/* Audio MD5: fork ffmpeg, hash decoded PCM                            */
+/* ------------------------------------------------------------------ */
+
+struct md5_job {
+	int64_t rowid;
+	char    path[4096];
+	char    hash[33]; /* 32 hex + NUL */
+};
+
+static struct md5_job *g_md5_jobs;
+static int             g_nmd5;
+static _Atomic int     g_md5_next;
+static _Atomic int     g_md5_done;
+
+static void *md5_worker(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		int i = g_md5_next++;
+		if (i >= g_nmd5) break;
+
+		int pfd[2];
+		if (pipe(pfd) < 0) continue;
+
+		pid_t pid = fork();
+		if (pid == 0) {
+			close(pfd[0]);
+			dup2(pfd[1], STDOUT_FILENO);
+			close(pfd[1]);
+			int nul = open("/dev/null", O_WRONLY);
+			if (nul >= 0) {
+				dup2(nul, STDERR_FILENO);
+				close(nul);
+			}
+			execlp("ffmpeg", "ffmpeg",
+			       "-loglevel", "error",
+			       "-i", g_md5_jobs[i].path,
+			       "-vn", "-map", "0:a",
+			       "-c:a", "pcm_s32le",
+			       "-f", "md5", "-",
+			       NULL);
+			_exit(1);
+		}
+
+		close(pfd[1]);
+		char buf[128] = "";
+		ssize_t nr = read(pfd[0], buf, sizeof(buf) - 1);
+		close(pfd[0]);
+		if (nr > 0) buf[nr] = '\0';
+
+		int status;
+		waitpid(pid, &status, 0);
+
+		char *eq = strchr(buf, '=');
+		if (eq) {
+			eq++;
+			char *nl = strchr(eq, '\n');
+			if (nl) *nl = '\0';
+			if (strlen(eq) == 32)
+				memcpy(g_md5_jobs[i].hash, eq, 33);
+		}
+		g_md5_done++;
+	}
+	return NULL;
+}
+
+static void compute_audio_md5(sqlite3 *db)
+{
+	sqlite3_stmt *st;
+	int rc = sqlite3_prepare_v2(db,
+		"SELECT id, path FROM tracks"
+		" WHERE audiomd5 IS NULL OR audiomd5 = '';",
+		-1, &st, NULL);
+	if (rc != SQLITE_OK) return;
+
+	int cap = 4096;
+	g_md5_jobs = malloc(cap * sizeof(*g_md5_jobs));
+	g_nmd5 = 0;
+
+	while (sqlite3_step(st) == SQLITE_ROW) {
+		if (g_nmd5 >= cap) {
+			cap *= 2;
+			g_md5_jobs = realloc(g_md5_jobs,
+				cap * sizeof(*g_md5_jobs));
+		}
+		g_md5_jobs[g_nmd5].rowid = sqlite3_column_int64(st, 0);
+		const char *p = (const char *)sqlite3_column_text(st, 1);
+		strncpy(g_md5_jobs[g_nmd5].path, p, 4095);
+		g_md5_jobs[g_nmd5].path[4095] = '\0';
+		g_md5_jobs[g_nmd5].hash[0] = '\0';
+		g_nmd5++;
+	}
+	sqlite3_finalize(st);
+
+	if (g_nmd5 == 0) {
+		free(g_md5_jobs);
+		return;
+	}
+
+	printf("Computing audio MD5 for %d tracks...\n", g_nmd5);
+	g_md5_next = 0;
+	g_md5_done = 0;
+	int nthreads = sysconf(_SC_NPROCESSORS_ONLN);
+	if (nthreads < 1) nthreads = 4;
+	if (nthreads > g_nmd5) nthreads = g_nmd5;
+	pthread_t *tids = malloc(nthreads * sizeof(*tids));
+
+	for (int i = 0; i < nthreads; i++)
+		pthread_create(&tids[i], NULL, md5_worker, NULL);
+	for (int i = 0; i < nthreads; i++)
+		pthread_join(tids[i], NULL);
+	free(tids);
+
+	/* batch write hashes to DB */
+	sqlite3_stmt *upd;
+	sqlite3_prepare_v2(db,
+		"UPDATE tracks SET audiomd5=? WHERE id=?;",
+		-1, &upd, NULL);
+	sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL);
+
+	int wrote = 0;
+	for (int i = 0; i < g_nmd5; i++) {
+		if (!g_md5_jobs[i].hash[0]) continue;
+		sqlite3_reset(upd);
+		sqlite3_bind_text(upd, 1, g_md5_jobs[i].hash,
+			-1, SQLITE_STATIC);
+		sqlite3_bind_int64(upd, 2, g_md5_jobs[i].rowid);
+		sqlite3_step(upd);
+		wrote++;
+	}
+	sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+	sqlite3_finalize(upd);
+	printf("Audio MD5: %d/%d computed\n", wrote, g_nmd5);
+	free(g_md5_jobs);
+}
+
+static void build_image_cache(sqlite3 *db, const char *home,
+			      const char *filter)
 {
 	char cache_dir[4096];
 	snprintf(cache_dir, sizeof(cache_dir),
 		 "%s/.cache/qua-music-tui", home);
 	mkdir(cache_dir, 0755);
 
+	/* resolve filter to a directory */
+	char fdir[PATH_MAX] = "";
+	if (filter) {
+		struct stat fst;
+		if (stat(filter, &fst) == 0 && S_ISREG(fst.st_mode)) {
+			strncpy(fdir, filter, sizeof(fdir) - 1);
+			char *sl = strrchr(fdir, '/');
+			if (sl) *sl = '\0';
+		} else {
+			strncpy(fdir, filter, sizeof(fdir) - 1);
+			int len = strlen(fdir);
+			if (len > 1 && fdir[len - 1] == '/')
+				fdir[len - 1] = '\0';
+		}
+	}
+
 	sqlite3_stmt *dirs;
-	if (sqlite3_prepare_v2(db,
-		"SELECT DISTINCT"
-		" rtrim(rtrim(path, replace(path, '/', '')), '/')"
-		" FROM tracks;", -1, &dirs, NULL) != SQLITE_OK)
-		return;
+	if (fdir[0]) {
+		if (sqlite3_prepare_v2(db,
+			"SELECT DISTINCT"
+			" rtrim(rtrim(path, replace(path, '/', '')), '/')"
+			" FROM tracks"
+			" WHERE path >= ? || '/'"
+			" AND path < ? || '0';",
+			-1, &dirs, NULL) != SQLITE_OK)
+			return;
+		sqlite3_bind_text(dirs, 1, fdir, -1, SQLITE_STATIC);
+		sqlite3_bind_text(dirs, 2, fdir, -1, SQLITE_STATIC);
+	} else {
+		if (sqlite3_prepare_v2(db,
+			"SELECT DISTINCT"
+			" rtrim(rtrim(path, replace(path, '/', '')), '/')"
+			" FROM tracks;", -1, &dirs, NULL) != SQLITE_OK)
+			return;
+	}
 
 	sqlite3_exec(db,
 		"CREATE INDEX IF NOT EXISTS idx_path ON tracks(path);",
@@ -1330,9 +1500,16 @@ static void build_image_cache(sqlite3 *db, const char *home)
 	g_njobs = 0;
 	int total = 0;
 
+	int fdir_len = strlen(fdir);
+
 	while (sqlite3_step(dirs) == SQLITE_ROW) {
 		const char *d = (const char *)sqlite3_column_text(dirs, 0);
 		if (!d || !*d) continue;
+
+		/* dir filter: skip anything deeper than 1 level */
+		if (fdir_len && strchr(d + fdir_len + 1, '/'))
+			continue;
+
 		total++;
 
 		char cover[4096] = "";
@@ -1406,7 +1583,7 @@ static void build_image_cache(sqlite3 *db, const char *home)
 		/* queue cache job or read dims from existing cache */
 		if (*cpath) {
 			struct stat cst;
-			if (stat(cpath, &cst) != 0) {
+			if (g_force || stat(cpath, &cst) != 0) {
 				if (g_njobs >= cap) {
 					cap *= 2;
 					g_jobs = realloc(g_jobs,
@@ -1484,9 +1661,13 @@ static void build_image_cache(sqlite3 *db, const char *home)
 
 int main(int argc, char *argv[])
 {
+	sqlite3_initialize();
 	int cleanup_mode = 0;
 	int imgcache_mode = 0;
+	int md5_mode = 0;
 	const char *dir    = NULL;
+	const char *img_filter = NULL;
+	static char img_filter_buf[PATH_MAX];
 	static char dbpath_buf[4096];
 	const char *home = getenv("HOME");
 	if (!home) { fprintf(stderr, "$HOME not set\n"); return 1; }
@@ -1507,24 +1688,44 @@ int main(int argc, char *argv[])
 		g_debug = 1;
 		argi++;
 	}
+	if (argi < argc && strcmp(argv[argi], "-m") == 0) {
+		md5_mode = 1;
+		argi++;
+	}
+	if (argi < argc && strcmp(argv[argi], "-f") == 0) {
+		g_force = 1;
+		argi++;
+	}
 	if (argi < argc && strcmp(argv[argi], "-i") == 0) {
 		imgcache_mode = 1;
 		argi++;
-		if (argi < argc) dbpath = argv[argi++];
+		if (argi < argc) {
+			if (realpath(argv[argi], img_filter_buf))
+				img_filter = img_filter_buf;
+			argi++;
+		}
 	} else if (argi < argc && strcmp(argv[argi], "-c") == 0) {
 		cleanup_mode = 1;
 		argi++;
-		if (argi < argc) dbpath = argv[argi++];
 	} else {
 		if (argi < argc && strcmp(argv[argi], "-a") == 0)
 			argi++;
-		if (argi < argc) dir = argv[argi++];
-		if (argi < argc) dbpath = argv[argi++];
-		if (!dir) { usage(argv[0]); return 1; }
-		/* resolve to absolute path so DB never stores relative paths */
+		if (argi < argc) {
+			char resolved[PATH_MAX];
+			dir = argv[argi++];
+			if (realpath(dir, resolved))
+				dir = resolved;
+		}
+	}
+	if (!dir && argi < argc && argv[argi][0] != '-') {
 		char resolved[PATH_MAX];
+		dir = argv[argi++];
 		if (realpath(dir, resolved))
 			dir = resolved;
+	}
+	if (!dir && !cleanup_mode && !imgcache_mode) {
+		usage(argv[0]);
+		return 1;
 	}
 
 	sqlite3 *db;
@@ -1538,8 +1739,10 @@ int main(int argc, char *argv[])
 
 	if (db_init(db) != 0) return 1;
 
+	scan_stats_t stats = {0};
+
 	if (imgcache_mode) {
-		build_image_cache(db, home);
+		build_image_cache(db, home, img_filter);
 		sqlite3_finalize(g_upsert_stmt);
 		sqlite3_finalize(g_update_path_stmt);
 		sqlite3_finalize(g_delete_stmt);
@@ -1549,6 +1752,7 @@ int main(int argc, char *argv[])
 		sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL);
 		cleanup_stale(db);
 		sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+		stats.added = 1;  /* force FTS5 rebuild after cleanup */
 	} else {
 		hmap_t m = {0};
 		if (db_load_existing(db, &m) != 0) {
@@ -1560,7 +1764,6 @@ int main(int argc, char *argv[])
 
 		sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL);
 
-		scan_stats_t stats = {0};
 		scan_dir(db, &m, dir, &stats);
 
 		sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
@@ -1573,18 +1776,23 @@ int main(int argc, char *argv[])
 		hmap_destroy(&m);
 	}
 
-	/* (re)build FTS5 trigram index for fast substring search */
-	printf("Building search index...\n");
-	sqlite3_exec(db,
-		"DROP TABLE IF EXISTS tracks_fts;"
-		"CREATE VIRTUAL TABLE tracks_fts USING fts5("
-		"  title, artist, album, album_artist, date, path,"
-		"  content=tracks, content_rowid=rowid,"
-		"  tokenize='trigram'"
-		");"
-		"INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild');",
-		NULL, NULL, NULL);
-	printf("Search index built.\n");
+	if (md5_mode)
+		compute_audio_md5(db);
+
+	/* rebuild FTS5 trigram index only when tracks changed */
+	if (stats.added || stats.updated || stats.moved) {
+		printf("Building search index...\n");
+		sqlite3_exec(db,
+			"DROP TABLE IF EXISTS tracks_fts;"
+			"CREATE VIRTUAL TABLE tracks_fts USING fts5("
+			"  title, artist, album, album_artist, date, path,"
+			"  content=tracks, content_rowid=rowid,"
+			"  tokenize='trigram'"
+			");"
+			"INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild');",
+			NULL, NULL, NULL);
+		printf("Search index built.\n");
+	}
 
 	sqlite3_finalize(g_upsert_stmt);
 	sqlite3_finalize(g_update_path_stmt);

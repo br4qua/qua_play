@@ -1,0 +1,56 @@
+CC = gcc
+CFLAGS = -O2 -march=native -mtune=native -flto -Wall -std=c23
+
+SQLITE_DIR = sqlite-amalgamation-3510300/sqlite-amalgamation-3510300
+SQLITE_SRC = $(SQLITE_DIR)/sqlite3.c
+SQLITE_INC = -I$(SQLITE_DIR)
+SQLITE_FLAGS = -DSQLITE_THREADSAFE=1         \
+               -DSQLITE_DEFAULT_MEMSTATUS=0  \
+               -DSQLITE_DQS=0               \
+               -DSQLITE_ENABLE_FTS5          \
+               -DSQLITE_OMIT_LOAD_EXTENSION  \
+               -DSQLITE_OMIT_DEPRECATED      \
+               -DSQLITE_OMIT_SHARED_CACHE    \
+               -DSQLITE_OMIT_AUTOINIT        \
+               -DSQLITE_OMIT_PROGRESS_CALLBACK \
+               -DSQLITE_OMIT_TRACE           \
+               -DSQLITE_OMIT_UTF16           \
+               -DSQLITE_OMIT_COMPLETE        \
+               -DSQLITE_OMIT_DECLTYPE        \
+               -DSQLITE_OMIT_AUTHORIZATION
+
+LDFLAGS = -flto
+
+TARGET = qua-music-lib
+SRCS = poc.c $(SQLITE_SRC)
+LIBS = -lpng -lz -lm -lpthread
+PREFIX = /usr/local
+
+TUI = qua-music-tui
+TUI_SRCS = tui.c $(SQLITE_SRC)
+TUI_LIBS = -lncursesw -lm
+
+all: $(TARGET) $(TUI)
+
+$(TARGET): $(SRCS)
+	$(CC) $(CFLAGS) $(SQLITE_INC) $(SQLITE_FLAGS) $(SRCS) -o $(TARGET) $(LDFLAGS) $(LIBS)
+	@echo "Build complete: ./$(TARGET)"
+
+$(TUI): $(TUI_SRCS)
+	$(CC) $(CFLAGS) $(SQLITE_INC) $(SQLITE_FLAGS) $(TUI_SRCS) -o $(TUI) $(LDFLAGS) $(TUI_LIBS)
+	@echo "Build complete: ./$(TUI)"
+
+install: $(TARGET) $(TUI)
+	install -d $(PREFIX)/bin
+	install -m 755 $(TARGET) $(PREFIX)/bin/
+	install -m 755 $(TUI) $(PREFIX)/bin/
+	@echo "Installed to $(PREFIX)/bin/"
+
+uninstall:
+	rm -f $(PREFIX)/bin/$(TARGET) $(PREFIX)/bin/$(TUI)
+	@echo "Uninstalled"
+
+clean:
+	rm -f $(TARGET) $(TUI)
+
+.PHONY: all install uninstall clean

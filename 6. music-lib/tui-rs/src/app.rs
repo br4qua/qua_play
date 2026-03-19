@@ -10,7 +10,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::prelude::*;
+use std::collections::HashMap;
 use std::io::{self, stdout};
+use std::path::Path;
 use std::process::Command;
 
 /// Substring search mode (Ctrl+F, tab to cycle). Exact mode = info-panel click.
@@ -95,6 +97,15 @@ fn track_matches_album_exact(t: &Track, album: &str) -> bool {
     t.album.eq_ignore_ascii_case(album)
 }
 
+/// Match for filter n/p: query as substring in title or artist only (mirrors line_with_highlights).
+fn track_matches_filter_display(t: &Track, query: &str) -> bool {
+    if query.trim().is_empty() {
+        return false;
+    }
+    let q = query.to_lowercase();
+    t.title.to_lowercase().contains(&q) || t.artist.to_lowercase().contains(&q)
+}
+
 /// Match track by exact column (tui.c right-click filter).
 fn track_matches_column(t: &Track, col: &str, val: &str) -> bool {
     if val.is_empty() {
@@ -112,23 +123,12 @@ fn track_matches_column(t: &Track, col: &str, val: &str) -> bool {
     }
 }
 
-fn find_next_view(
+fn find_next_view_filter(
     view: &[ViewRow],
     tracks: &[Track],
     query: &str,
     cursor: usize,
     include: bool,
-) -> Option<usize> {
-    find_next_view_mode(view, tracks, query, cursor, include, FindMode::Everything)
-}
-
-fn find_next_view_mode(
-    view: &[ViewRow],
-    tracks: &[Track],
-    query: &str,
-    cursor: usize,
-    include: bool,
-    mode: FindMode,
 ) -> Option<usize> {
     if query.is_empty() {
         return Some(cursor);
@@ -142,7 +142,7 @@ fn find_next_view_mode(
         let idx = (cursor + i) % n;
         if let Some(ViewRow::Track(ti)) = view.get(idx) {
             if let Some(t) = tracks.get(*ti) {
-                if track_matches_mode(t, query, mode) {
+                if track_matches_filter_display(t, query) {
                     return Some(idx);
                 }
             }
@@ -151,23 +151,12 @@ fn find_next_view_mode(
     None
 }
 
-fn find_prev_view(
+fn find_prev_view_filter(
     view: &[ViewRow],
     tracks: &[Track],
     query: &str,
     cursor: usize,
     include: bool,
-) -> Option<usize> {
-    find_prev_view_mode(view, tracks, query, cursor, include, FindMode::Everything)
-}
-
-fn find_prev_view_mode(
-    view: &[ViewRow],
-    tracks: &[Track],
-    query: &str,
-    cursor: usize,
-    include: bool,
-    mode: FindMode,
 ) -> Option<usize> {
     if query.is_empty() {
         return Some(cursor);
@@ -181,7 +170,7 @@ fn find_prev_view_mode(
         let idx = (cursor + n - i) % n;
         if let Some(ViewRow::Track(ti)) = view.get(idx) {
             if let Some(t) = tracks.get(*ti) {
-                if track_matches_mode(t, query, mode) {
+                if track_matches_filter_display(t, query) {
                     return Some(idx);
                 }
             }
@@ -291,7 +280,7 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
     }
     /* center viewport on restored selection (tui.c) */
     if let Ok(sz) = terminal.size() {
-        let (_, list_chunk, _) = ui::split_full(Rect::new(0, 0, sz.width, sz.height));
+        let (_, list_chunk, _, _, _, _) = ui::split_full(Rect::new(0, 0, sz.width, sz.height));
         let rows_h = list_chunk.height.saturating_sub(3).max(1) as usize;
         if selection > rows_h / 2 {
             scroll_top = selection.saturating_sub(rows_h / 2);
@@ -301,8 +290,12 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
     let mut sidebar_state = SidebarState::default();
     let mut sidebar_clicks = ratatui_interact::traits::ClickRegionRegistry::<SidebarClick>::new();
     let mut list_state = TrackListState::default();
-    let mut last_art_selection: Option<usize> = None;
+    let mut last_art_track_path: Option<String> = None; /* track under cursor — redraw when view changes (find) or selection moves */
     let mut last_art_path: Option<std::path::PathBuf> = None;
+    let mut last_term_size: Option<(u16, u16)> = None; /* redraw when terminal resizes; art_area can stay same due to square rounding */
+    let mut art_cover_cache: HashMap<std::path::PathBuf, Option<std::path::PathBuf>> = HashMap::new();
+    let mut art_redraw_count: u32 = 0;
+    let mut first_art_draw = true;
     let mut last_click_row: Option<usize> = None;
     /* Layout from last draw — used for click detection to match what's on screen */
     let mut last_layout: Option<(Rect, Rect, Rect, usize)> = None; /* (list_chunk, info_area, art_area, visible) */
@@ -322,7 +315,14 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
         if let Some((path, md5)) = pending_md5.take() {
             crate::db::update_track_audiomd5(db_path, &path, &md5);
             if let Some(tr) = tracks.iter_mut().find(|x| x.path == path) {
-                tr.audiomd5 = md5;
+                tr.audiomd5 = md5.clone();
+            }
+            /* Update filtered_tracks when find active — display uses it, not tracks */
+            for tr in filtered_tracks.iter_mut() {
+                if tr.path == path {
+                    tr.audiomd5 = md5;
+                    break;
+                }
             }
             dirty = true;
         }
@@ -384,7 +384,8 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
                 Ok(sz) => Rect::new(0, 0, sz.width, sz.height),
                 Err(_) => Rect::new(0, 0, 80, 24),
             };
-            let (sidebar_chunk, list_chunk, status_chunk) = ui::split_full(area);
+            let (sidebar_chunk, list_chunk, status_chunk, art_area, _div_area, info_area) =
+                ui::split_full(area);
             let visible = list_chunk.height.saturating_sub(3).max(1) as usize;
             if selection >= scroll_top + visible {
                 scroll_top = selection.saturating_sub(visible).saturating_add(1);
@@ -413,6 +414,9 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
                     sidebar_chunk,
                     list_chunk,
                     status_chunk,
+                    art_area,
+                    _div_area,
+                    info_area,
                     selection,
                     scroll_top,
                     &find_query,
@@ -427,46 +431,99 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
                     &mut sidebar_state,
                     &mut list_state,
                     &mut sidebar_clicks,
+                    art_redraw_count,
                 );
             })?;
 
-            /* Kitty cover art — only when selection changed */
-            let art_changed = last_art_selection != Some(selection);
-            if art_changed {
-                last_art_selection = Some(selection);
+            /* Kitty cover art — redraw when selection/cover/terminal changed. Skip expensive work when neither changed. */
+            if std::mem::take(&mut first_art_draw) {
+                /* First startup: always draw */
+                art::kitty_delete_all();
                 if let Some(t) = view::track_at(view, selection, tracks_ref) {
-                    let cover = art::resolve_cover(t).or_else(art::no_art_path);
-                    if cover.as_ref() != last_art_path.as_ref() {
-                        if last_art_path.is_some() {
-                            art::kitty_delete_all();
+                    let dir = Path::new(&t.path)
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_default();
+                    let cover = art_cover_cache
+                        .get(&dir)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            let c = art::resolve_cover(t).or_else(art::no_art_path);
+                            art_cover_cache.insert(dir, c.clone());
+                            c
+                        });
+                    last_art_path = cover.clone();
+                    last_art_track_path = Some(t.path.clone());
+                    last_term_size = Some((area.width, area.height));
+                    if let Some(ref c) = cover {
+                        let art_inner = ui::art_inner(art_area);
+                        if art_inner.height > 0 && art_inner.width > 0 {
+                            art::kitty_draw(c, art_inner, t);
                         }
-                        last_art_path = cover.clone();
+                    }
+                    art_redraw_count += 1;
+                }
+            } else {
+                let term_size = (area.width, area.height);
+                let term_changed = last_term_size != Some(term_size);
+                let current_track_path =
+                    view::track_at(view, selection, tracks_ref).map(|t| t.path.clone());
+                let track_changed = current_track_path.as_deref() != last_art_track_path.as_deref();
+                let need_redraw = if term_changed || track_changed {
+                    let prev_track_path = last_art_track_path.clone();
+                    last_art_track_path = current_track_path.clone();
+                    last_term_size = Some(term_size);
+                    let cover_changed = if let Some(t) = view::track_at(view, selection, tracks_ref) {
+                        let dir = Path::new(&t.path)
+                            .parent()
+                            .map(|p| p.to_path_buf())
+                            .unwrap_or_default();
+                        /* Same dir = same album = same cover — skip lookup and draw */
+                        let same_dir = prev_track_path
+                            .as_ref()
+                            .and_then(|p| Path::new(p).parent())
+                            .map(|p| p.to_path_buf())
+                            .as_ref()
+                            == Some(&dir);
+                        if same_dir {
+                            false
+                        } else {
+                            let cover = art_cover_cache
+                                .get(&dir)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    let c = art::resolve_cover(t).or_else(art::no_art_path);
+                                    art_cover_cache.insert(dir, c.clone());
+                                    c
+                                });
+                            let changed = cover.as_ref() != last_art_path.as_ref();
+                            last_art_path = cover;
+                            changed
+                        }
+                    } else {
+                        last_art_path = None;
+                        true
+                    };
+                    term_changed || cover_changed
+                } else {
+                    false
+                };
+
+                if need_redraw {
+                    art::kitty_delete_all();
+                    if let Some(t) = view::track_at(view, selection, tracks_ref) {
                         if let Some(ref c) = last_art_path {
-                            let (art_area, _, _) = ui::split_sidebar(sidebar_chunk);
                             let art_inner = ui::art_inner(art_area);
                             if art_inner.height > 0 && art_inner.width > 0 {
                                 art::kitty_draw(c, art_inner, t);
                             }
                         }
                     }
-                } else {
-                    last_art_path = None;
-                    art::kitty_delete_all();
+                    art_redraw_count += 1;
                 }
             }
             /* Store layout from draw so click detection matches what's on screen */
-            last_layout = Some((
-                list_chunk,
-                {
-                    let (_, _, info_area) = ui::split_sidebar(sidebar_chunk);
-                    info_area
-                },
-                {
-                    let (art_area, _, _) = ui::split_sidebar(sidebar_chunk);
-                    art_area
-                },
-                visible,
-            ));
+            last_layout = Some((list_chunk, info_area, art_area, visible));
             dirty = false;
         }
 
@@ -474,9 +531,8 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
             last_layout.unwrap_or_else(|| {
                 if let Ok(sz) = terminal.size() {
                     let area = Rect::new(0, 0, sz.width, sz.height);
-                    let (sidebar, list, _status) = ui::split_full(area);
+                    let (_sidebar, list, _status, art_area, _div, info_area) = ui::split_full(area);
                     let visible = list.height.saturating_sub(3).max(1) as usize;
-                    let (art_area, _, info_area) = ui::split_sidebar(sidebar);
                     (list, info_area, art_area, visible)
                 } else {
                     (
@@ -489,6 +545,7 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
             });
 
         match event::read()? {
+            Event::Resize(_, _) => dirty = true,
             Event::Paste(s) => {
                 if find_mode {
                     const MAX: usize = 512;
@@ -505,7 +562,7 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
                             filter_query.push(c);
                         }
                     }
-                    if let Some(idx) = find_next_view(view, tracks_ref, &filter_query, selection, true) {
+                    if let Some(idx) = find_next_view_filter(view, tracks_ref, &filter_query, selection, true) {
                         selection = idx;
                         if selection >= scroll_top + visible {
                             scroll_top = selection.saturating_sub(visible - 1);
@@ -550,6 +607,12 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
                         KeyCode::Enter => {
                             find_query = find_input.clone();
                             find_mode = false;
+                            find_column = None;
+                            find_album_exact = None;
+                            last_find_column = None;
+                            last_find_album = None;
+                            selection = 0;
+                            scroll_top = 0;
                             dirty = true;
                         }
                         KeyCode::Backspace => {
@@ -569,7 +632,6 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('f') {
                     find_mode = true;
                     filter_mode = false; /* mutual exclusion: only one popup active */
-                    find_album_exact = None;
                     find_input.clear(); /* start with empty line */
                     dirty = true;
                     continue;
@@ -594,7 +656,7 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
                         }
                         KeyCode::Backspace => {
                             filter_query.pop();
-                            if let Some(idx) = find_next_view(view, tracks_ref, &filter_query, selection, true) {
+                            if let Some(idx) = find_next_view_filter(view, tracks_ref, &filter_query, selection, true) {
                                 selection = idx;
                                 if selection >= scroll_top + visible {
                                     scroll_top = selection.saturating_sub(visible - 1);
@@ -607,7 +669,7 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
                         KeyCode::Char(c) if !c.is_control() => {
                             if filter_query.len() < 512 {
                                 filter_query.push(c);
-                                if let Some(idx) = find_next_view(view, tracks_ref, &filter_query, selection, true) {
+                                if let Some(idx) = find_next_view_filter(view, tracks_ref, &filter_query, selection, true) {
                                     selection = idx;
                                     if selection >= scroll_top + visible {
                                         scroll_top = selection.saturating_sub(visible - 1);
@@ -622,32 +684,9 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
                     }
                     continue;
                 }
-                if key.code == KeyCode::Char('n') && !find_query.is_empty() {
-                    if let Some(idx) = find_next_view_mode(view, tracks_ref, &find_query, selection, false, find_mode_kind) {
-                        selection = idx;
-                        if selection >= scroll_top + visible {
-                            scroll_top = selection.saturating_sub(visible - 1);
-                        } else if selection < scroll_top {
-                            scroll_top = selection;
-                        }
-                        dirty = true;
-                    }
-                    continue;
-                }
-                if key.code == KeyCode::Char('n') && !filter_query.is_empty() && find_query.is_empty() {
-                    if let Some(idx) = find_next_view(view, tracks_ref, &filter_query, selection, false) {
-                        selection = idx;
-                        if selection >= scroll_top + visible {
-                            scroll_top = selection.saturating_sub(visible - 1);
-                        } else if selection < scroll_top {
-                            scroll_top = selection;
-                        }
-                        dirty = true;
-                    }
-                    continue;
-                }
-                if key.code == KeyCode::Char('p') && !find_query.is_empty() {
-                    if let Some(idx) = find_prev_view_mode(view, tracks_ref, &find_query, selection, false, find_mode_kind) {
+                if key.code == KeyCode::Char('n') && !filter_query.is_empty()
+                {
+                    if let Some(idx) = find_next_view_filter(view, tracks_ref, &filter_query, selection, false) {
                         selection = idx;
                         if selection >= scroll_top + visible {
                             scroll_top = selection.saturating_sub(visible - 1);
@@ -660,9 +699,8 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
                 }
                 if (key.code == KeyCode::Char('p') || key.code == KeyCode::Char('?'))
                     && !filter_query.is_empty()
-                    && find_query.is_empty()
                 {
-                    if let Some(idx) = find_prev_view(view, tracks_ref, &filter_query, selection, false) {
+                    if let Some(idx) = find_prev_view_filter(view, tracks_ref, &filter_query, selection, false) {
                         selection = idx;
                         if selection >= scroll_top + visible {
                             scroll_top = selection.saturating_sub(visible - 1);
@@ -674,6 +712,19 @@ pub fn run(db_path: &std::path::Path, mut tracks: Vec<Track>) -> io::Result<()> 
                     continue;
                 }
                 match key.code {
+                    KeyCode::Char('c') => {
+                        /* Clear any active find (column, album, query) — back to full view */
+                        if find_column.is_some() || find_album_exact.is_some() || !find_query.is_empty() {
+                            find_column = None;
+                            find_album_exact = None;
+                            find_query.clear();
+                            find_input.clear();
+                            last_find_column = None;
+                            last_find_album = None;
+                            last_find_query.clear();
+                            dirty = true;
+                        }
+                    }
                     KeyCode::Char('y') => {
                         /* y = yank/copy path (no Ctrl — works in all terminals) */
                         if let Some(t) = view::track_at(&view, selection, tracks_ref) {

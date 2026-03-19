@@ -2,3 +2,15 @@ bin/
 .viscode/
 test-audio/
 qua-play/qua-play
+target/
+6. music-lib/music.db
+6. music-lib/perf.data
+6. music-lib/perf.data.old
+6. music-lib/no-art.png
+6. music-lib/No-album-art.png
+6. music-lib/qua-music-tui
+6. music-lib/bench-decode/bench_decode
+6. music-lib/bench-decode/bench_decode_turbo
+6. music-lib/bench-decode/bench_encode
+6. music-lib/bench-decode/bench_resize
+6. music-lib/tui-rs-backup/

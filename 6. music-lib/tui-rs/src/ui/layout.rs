@@ -8,10 +8,10 @@ use crate::art;
 pub const SIDEBAR_PCT: u16 = 38;
 
 /// Min rows reserved for info panel below art (like MIN_INFO_ROWS in tui.c).
-pub const MIN_INFO_ROWS: u16 = 10;
+pub const MIN_INFO_ROWS: u16 = 9;
 
-/// Full layout: sidebar, list, status bar. Reserves bottom row for status.
-pub fn split_full(area: Rect) -> (Rect, Rect, Rect) {
+/// Full layout: art+info (left), list (right), status. Single art_area_dim call.
+pub fn split_full(area: Rect) -> (Rect, Rect, Rect, Rect, Rect, Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -21,16 +21,24 @@ pub fn split_full(area: Rect) -> (Rect, Rect, Rect) {
         .split(area);
     let content = chunks[0];
     let status = chunks[1];
-    let (sidebar, list) = split_main(content);
-    (sidebar, list, status)
+    let (sidebar, list, art_area, div_area, info_area) = split_main(content);
+    (sidebar, list, status, art_area, div_area, info_area)
 }
 
-/// Splits the main content area into sidebar (left) and list (right).
-/// List starts at aw (actual sidebar content width), so list gets more space
-/// when the art square is narrower than 38% (tui.c: list_x = aw, list_w = COLS - aw).
-pub fn split_main(area: Rect) -> (Rect, Rect) {
-    let sidebar_max = (area.width as u32 * SIDEBAR_PCT as u32 / 100) as u16;
-    let (aw, _) = art_area_dim(sidebar_max, area.height);
+/// Splits content: art+info (left) | list (right). Computes (aw, split) once, builds all rects.
+/// No second art_area_dim call — single source of truth, no rounding gap.
+pub fn split_main(area: Rect) -> (Rect, Rect, Rect, Rect, Rect) {
+    let max_cols = (area.width as u32 * SIDEBAR_PCT as u32 / 100) as u16;
+    let (mut aw, mut split) = art_area_dim(max_cols, area.height);
+    loop {
+        let (aw_next, split_next) = art_area_dim(aw, area.height);
+        if aw_next == aw && split_next == split {
+            break;
+        }
+        aw = aw_next;
+        split = split_next;
+    }
+
     let sidebar = Rect {
         x: area.x,
         y: area.y,
@@ -43,54 +51,15 @@ pub fn split_main(area: Rect) -> (Rect, Rect) {
         width: area.width.saturating_sub(aw),
         height: area.height,
     };
-    (sidebar, list)
-}
 
-/// Art area dimensions (tui.c art_area_dim): largest visual square fitting above info.
-fn art_area_dim(rw: u16, rows_h: u16) -> (u16, u16) {
-    let (cw, ch) = art::get_cell_size();
-    let cw = cw.max(1) as u16;
-    let ch = ch.max(1) as u16;
-    let max_aw = rw;
-    let max_art_h = rows_h.saturating_sub(MIN_INFO_ROWS).max(1);
-    /* largest square that fits: aw*cw == split*ch (visually square) */
-    let split_by_w = ((max_aw as u32) * (cw as u32) / (ch as u32)) as u16;
-    let aw_by_h = ((max_art_h as u32) * (ch as u32) / (cw as u32)) as u16;
-    let (aw, split) = if split_by_w <= max_art_h {
-        (max_aw, split_by_w)
-    } else {
-        if aw_by_h <= max_aw {
-            (aw_by_h, max_art_h)
-        } else {
-            (max_aw, ((max_aw as u32) * (cw as u32) / (ch as u32)) as u16)
-        }
-    };
-    let aw = aw.max(1);
-    let split = split.max(1).min(rows_h.saturating_sub(MIN_INFO_ROWS));
-    (aw, split.max(1))
-}
-
-/// Splits sidebar into art area (top) and info area (bottom).
-/// Art area is visually square (tui.c art_area_dim: uses cell aspect ratio).
-/// Info gets MIN_INFO_ROWS; art gets the rest, capped to square.
-pub fn split_sidebar(area: Rect) -> (Rect, Rect, Rect) {
-    let total = area.height;
-    if total <= 1 {
-        return (area, area, Rect::default());
-    }
-    let (aw, split) = art_area_dim(area.width, total);
-
-    /* Art area: may be narrower than full sidebar when height-constrained */
     let art_area = Rect {
         x: area.x,
         y: area.y,
         width: aw,
         height: split,
     };
-
-    /* Info area directly below art (no divider line) */
     let rest_top = area.y + split;
-    let rest_height = total.saturating_sub(split);
+    let rest_height = area.height.saturating_sub(split);
     let div_area = Rect {
         x: area.x,
         y: rest_top,
@@ -104,7 +73,24 @@ pub fn split_sidebar(area: Rect) -> (Rect, Rect, Rect) {
         height: rest_height,
     };
 
-    (art_area, div_area, info_area)
+    (sidebar, list, art_area, div_area, info_area)
+}
+
+/// Art area dimensions: largest square fitting above info.
+/// Target the INNER area (inside 1-cell border) so image region is square.
+/// Inner: (aw-2)*cw == (split-2)*ch  =>  aw = 2 + (split-2)*ch/cw
+fn art_area_dim(rw: u16, rows_h: u16) -> (u16, u16) {
+    let (cw, ch) = art::get_cell_size();
+    let cw = cw.max(1) as u32;
+    let ch = ch.max(1) as u32;
+    let max_aw = rw as u32;
+    let max_art_h = rows_h.saturating_sub(MIN_INFO_ROWS).max(2) as u32;
+    /* max split for square inner: (split-2)*ch/cw <= max_aw-2  =>  split <= 2 + (max_aw-2)*cw/ch */
+    let split_by_w = 2 + (max_aw.saturating_sub(2) * cw / ch);
+    let split = split_by_w.min(max_art_h).max(2);
+    let aw = 2 + ((split - 2) * ch / cw);
+    let aw = aw.min(max_aw).max(2);
+    ((aw as u16).max(1), (split as u16).max(1).min(rows_h.saturating_sub(MIN_INFO_ROWS)))
 }
 
 /// Inner rect for bordered Art block (1-cell border). Kitty image draws here.

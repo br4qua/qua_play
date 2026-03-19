@@ -4,7 +4,7 @@ mod layout;
 mod sidebar;
 mod track_list;
 
-pub use layout::{art_inner, split_full, split_sidebar};
+pub use layout::{art_inner, split_full};
 pub use sidebar::{info_field_at_line, render as render_sidebar, SidebarClick, SidebarState};
 pub use track_list::{render as render_track_list, TrackListState};
 
@@ -19,9 +19,12 @@ pub fn render(
     f: &mut Frame,
     view: &[ViewRow],
     tracks: &[Track],
-    sidebar_chunk: Rect,
+    _sidebar_chunk: Rect,
     list_chunk: Rect,
     status_chunk: Rect,
+    art_area: Rect,
+    div_area: Rect,
+    info_area: Rect,
     selection: usize,
     scroll_top: usize,
     _find_query: &str,
@@ -36,9 +39,10 @@ pub fn render(
     sidebar_state: &mut SidebarState,
     list_state: &mut TrackListState,
     sidebar_clicks: &mut ratatui_interact::traits::ClickRegionRegistry<SidebarClick>,
+    art_redraw_count: u32,
 ) {
     let selected = crate::view::track_at(view, selection, tracks);
-    render_sidebar(f, sidebar_chunk, selected, sidebar_state, sidebar_clicks);
+    render_sidebar(f, art_area, div_area, info_area, selected, sidebar_state, sidebar_clicks, art_redraw_count);
     let find_term = find_label;
     render_track_list(
         f,
@@ -57,7 +61,7 @@ pub fn render(
         let h = 3u16;
         /* compute list rect from frame area so find box is centered in list, not full terminal */
         let area = f.area();
-        let (_, list_rect, _) = split_full(area);
+        let (_, list_rect, _, _, _, _) = split_full(area);
         let inner = Rect {
             x: list_rect.x + (list_rect.width.saturating_sub(w)) / 2,
             y: list_rect.y + (list_rect.height.saturating_sub(h)) / 2,
@@ -93,7 +97,7 @@ pub fn render(
         let w = 50u16;
         let h = 3u16;
         let area = f.area();
-        let (_, list_rect, _) = split_full(area);
+        let (_, list_rect, _, _, _, _) = split_full(area);
         let inner = Rect {
             x: list_rect.x + (list_rect.width.saturating_sub(w)) / 2,
             y: list_rect.y + (list_rect.height.saturating_sub(h)) / 2,

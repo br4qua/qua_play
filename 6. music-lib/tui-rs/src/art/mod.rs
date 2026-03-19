@@ -156,6 +156,10 @@ pub fn kitty_draw(cover_path: &Path, art_area: Rect, track: &crate::db::Track) {
     let art_x_base = art_area.x as i32;
 
     let (cw, ch) = get_cell_size();
+    // eprintln!(
+    //     "cell size: {}x{} px, art_inner: {}x{} cells, visual: {}x{} px",
+    //     cw, ch, aw, art_h, aw * cw, art_h * ch
+    // );
     let (iw, ih) = if track.cover_w > 0 && track.cover_h > 0 {
         (track.cover_w as i32, track.cover_h as i32)
     } else {

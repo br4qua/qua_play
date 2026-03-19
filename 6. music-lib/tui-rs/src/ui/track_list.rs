@@ -166,10 +166,10 @@ pub fn render(
         None
     };
 
-    /* Fixed: "  " + hash(3) + "  " + "  " + "  " + dur(7) = 18 cols. Remaining for title+artist. */
+    /* Fixed: "    " + hash(3) + "  " + "  " + "  " + dur(7) = 20 cols. Remaining for title+artist. */
     let list_w = area.width.saturating_sub(2) as usize;
     let rem = list_w
-        .saturating_sub(18); /* 2+3+2+2+2+7 = fixed width */
+        .saturating_sub(20); /* 4+3+2+2+2+7 = fixed width */
     let title_w = ((rem * 3) / 5).max(1);
     let artist_w = rem.saturating_sub(title_w).saturating_sub(1).max(1);
 

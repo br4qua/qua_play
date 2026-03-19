@@ -5,7 +5,6 @@ use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientatio
 use ratatui_interact::traits::ClickRegionRegistry;
 
 use crate::db::Track;
-use crate::ui::layout::split_sidebar;
 
 /// Click action for sidebar (art right-click open cover, info left/right filter).
 #[derive(Clone)]
@@ -21,13 +20,15 @@ pub struct SidebarState {
 
 pub fn render(
     f: &mut Frame,
-    area: Rect,
+    art_area: Rect,
+    div_area: Rect,
+    info_area: Rect,
     selected: Option<&Track>,
     state: &mut SidebarState,
     clicks: &mut ClickRegionRegistry<SidebarClick>,
+    art_redraw_count: u32,
 ) {
     clicks.clear();
-    let (art_area, div_area, info_area) = split_sidebar(area);
 
     /* Register art area for right-click (open cover) */
     if art_area.width > 0 && art_area.height > 0 {
@@ -37,15 +38,15 @@ pub fn render(
     /* Art area with border (like Tracks, Info) — image rendered on top via kitty */
     let art_block = Block::default()
         .borders(Borders::ALL)
-        .title(" Art ")
+        .title(format!(" Art {} ", art_redraw_count))
         .style(Style::default().fg(Color::White));
     f.render_widget(art_block, art_area);
 
-    /* -- Info section: bordered like Tracks, div + info combined -- */
+    /* -- Info section: bordered like Tracks, aligned with art_block (same x/width) -- */
     let info_section = Rect {
-        x: div_area.x,
+        x: art_area.x,
         y: div_area.y,
-        width: div_area.width,
+        width: art_area.width,
         height: div_area.height + info_area.height,
     };
     let info_block = Block::default()

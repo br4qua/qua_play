@@ -1,1 +1,7 @@
 check to do list in convert for faster
+
+
+qua-play
+did not handle post processing correct (check 32khz, 6ch)
+post processing
+add auto-no-clipping?

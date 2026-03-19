@@ -8,4 +8,9 @@ while ps -p $(pgrep qua-player) > /dev/null 2>&1; do
     sleep 0.1
 done
 
-aud-on &
+systemctl --user restart \
+	pipewire.socket \
+	pipewire-pulse.socket \
+	pipewire.service \
+	wireplumber.service \
+	pipewire-pulse.service

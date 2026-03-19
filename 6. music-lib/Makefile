@@ -15,8 +15,9 @@ TUI_LIBS = -lsqlite3 -lncursesw -lm -lpthread
 all: $(TARGET) $(TUI)
 
 setup: no-art.png
-	mkdir -p $$HOME/.config/qua-player
+	mkdir -p $$HOME/.config/qua-player/tui-actions
 	cp no-art.png $$HOME/.config/qua-player/
+	for f in tui-actions/*; do [ -f "$$HOME/.config/qua-player/$$f" ] || cp $$f $$HOME/.config/qua-player/$$f && chmod +x $$HOME/.config/qua-player/$$f; done
 
 $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LDFLAGS) $(LIBS)

@@ -1,3 +1,6 @@
+objdump -d -M intel bin/qua-player-32-48000 | grep -B100 -A100 "xor.*r13,r8"    
+objdump -d -M intel "$(which qua-player-32-48000.pgo9994)" | grep -B100 -A100 "xor.*r13,r8"  
+
 Cleanup change: removed pcm_handle_cached alias
 
 The redundant `snd_pcm_t *const pcm_handle_cached = pcm_handle;` alias

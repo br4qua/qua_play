@@ -1489,7 +1489,6 @@ static void render(int top, int selected)
 	render_track_list(top, selected, list_x, list_w, rows_h);
 	render_sidebar(selected, 0, sidebar_w, rows_h);
 
-
 	/* status / query_buf bar */
 	static const char keys[] = "/: search  enter/p: play  s: stop  o: open  q: quit";
 	attron(COLOR_PAIR(3) | A_BOLD);
@@ -2024,7 +2023,7 @@ int main(int argc, char *argv[])
 						path_dir(t->path, adir, sizeof(adir));
 						find_cover_art(adir, src, sizeof(src));
 						if (*src)
-							run_action("view-image", src);
+							run_action("open-image", src);
 					}
 				}
 			}

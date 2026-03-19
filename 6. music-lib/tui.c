@@ -152,6 +152,13 @@ static int info_pad_sminrow, info_pad_smincol, info_pad_smaxrow, info_pad_smaxco
 static volatile sig_atomic_t got_sigcont;
 static void handle_sigcont(int sig) { (void)sig; got_sigcont = 1; }
 
+static void sigchld_handler(int sig)
+{
+	(void)sig;
+	while (waitpid(-1, NULL, WNOHANG) > 0)
+		;
+}
+
 static void crash_handler(int sig)
 {
 	/* restore terminal before logging */
@@ -182,7 +189,53 @@ static sqlite3    *mem_db;
 static sqlite3    *disk_db;
 static char        cur_art_path[PATH_MAX];
 static char        cache_dir[PATH_MAX];
-static const char  no_art_path[] = "/home/free2/code/musl2gcc/6. music-lib/no-art.png";
+static const char *g_home;
+
+/* Run script in ~/.config/qua-player/tui-actions/<name>. No-op if missing. */
+static void run_action(const char *name, const char *path)
+{
+	char script[PATH_MAX];
+	snprintf(script, sizeof(script), "%s/.config/qua-player/tui-actions/%s",
+		 g_home ? g_home : "", name);
+	if (access(script, X_OK) != 0) return;
+	pid_t pid = fork();
+	if (pid == 0) {
+		pid_t p2 = fork();
+		if (p2 == 0) {
+			int nul = open("/dev/null", O_RDWR);
+			if (nul >= 0) {
+				dup2(nul, STDIN_FILENO);
+				dup2(nul, STDOUT_FILENO);
+				dup2(nul, STDERR_FILENO);
+				close(nul);
+			}
+			setsid();
+			if (path)
+				execl(script, name, path, (char *)NULL);
+			else
+				execl(script, name, (char *)NULL);
+			_exit(1);
+		}
+		_exit(0);
+	}
+	if (pid > 0)
+		waitpid(pid, NULL, 0);
+}
+
+static const char *get_no_art_path(void)
+{
+	static char buf[PATH_MAX];
+	static int inited;
+	if (!inited) {
+		const char *home = getenv("HOME");
+		if (home)
+			snprintf(buf, sizeof(buf), "%s/.config/qua-player/no-art.png", home);
+		else
+			buf[0] = '\0';
+		inited = 1;
+	}
+	return buf;
+}
 
 /* ------------------------------------------------------------------ */
 /* DB                                                                  */
@@ -571,9 +624,7 @@ static void play_track(int view_idx)
 	if (view[view_idx].type != VIEW_TRACK) return;
 	int idx = view[view_idx].track_idx;
 	if (idx < 0 || idx >= ntracks) return;
-	const char *path = tracks[idx].path;
-	pid_t pid = fork();
-	if (pid == 0) { execlp("qua-play-this", "qua-play-this", path, NULL); _exit(1); }
+	run_action("play", tracks[idx].path);
 }
 
 /* ------------------------------------------------------------------ */
@@ -727,83 +778,6 @@ static void *md5_worker(void *arg)
 		}
 	}
 	return NULL;
-}
-
-static void compute_md5_all(void)
-{
-	/* collect tracks missing audiomd5 */
-	int cap = 1024;
-	md5_jobs = malloc(cap * sizeof(*md5_jobs));
-	md5_njobs = 0;
-
-	for (int i = 0; i < ntracks; i++) {
-		if (tracks[i].audiomd5[0]) continue;
-		if (md5_njobs >= cap) {
-			cap *= 2;
-			md5_jobs = realloc(md5_jobs, cap * sizeof(*md5_jobs));
-		}
-		md5_jobs[md5_njobs].track_idx = i;
-		md5_jobs[md5_njobs].hash[0] = '\0';
-		md5_njobs++;
-	}
-
-	if (md5_njobs == 0) { free(md5_jobs); return; }
-
-	md5_next = 0;
-	int nthreads = sysconf(_SC_NPROCESSORS_ONLN);
-	if (nthreads < 1) nthreads = 4;
-	if (nthreads > md5_njobs) nthreads = md5_njobs;
-	pthread_t *tids = malloc(nthreads * sizeof(*tids));
-
-	for (int i = 0; i < nthreads; i++)
-		pthread_create(&tids[i], NULL, md5_worker, NULL);
-	for (int i = 0; i < nthreads; i++)
-		pthread_join(tids[i], NULL);
-	free(tids);
-
-	/* update in-memory tracks + disk DB */
-	sqlite3_stmt *upd = NULL;
-	if (disk_db)
-		sqlite3_prepare_v2(disk_db,
-			"UPDATE tracks SET audiomd5=? WHERE path=?;",
-			-1, &upd, NULL);
-	if (upd) sqlite3_exec(disk_db, "BEGIN;", NULL, NULL, NULL);
-
-	for (int i = 0; i < md5_njobs; i++) {
-		if (!md5_jobs[i].hash[0]) continue;
-		track_t *t = &tracks[md5_jobs[i].track_idx];
-		memcpy(t->audiomd5, md5_jobs[i].hash, 33);
-		if (upd) {
-			sqlite3_reset(upd);
-			sqlite3_bind_text(upd, 1, t->audiomd5, -1, SQLITE_STATIC);
-			sqlite3_bind_text(upd, 2, t->path, -1, SQLITE_STATIC);
-			sqlite3_step(upd);
-		}
-	}
-
-	if (upd) {
-		sqlite3_exec(disk_db, "COMMIT;", NULL, NULL, NULL);
-		sqlite3_finalize(upd);
-	}
-
-	/* sync to mem_db so filters work */
-	sqlite3_stmt *mu = NULL;
-	if (mem_db)
-		sqlite3_prepare_v2(mem_db,
-			"UPDATE tracks SET audiomd5=? WHERE path=?;",
-			-1, &mu, NULL);
-	if (mu) {
-		for (int i = 0; i < md5_njobs; i++) {
-			if (!md5_jobs[i].hash[0]) continue;
-			track_t *t = &tracks[md5_jobs[i].track_idx];
-			sqlite3_reset(mu);
-			sqlite3_bind_text(mu, 1, t->audiomd5, -1, SQLITE_STATIC);
-			sqlite3_bind_text(mu, 2, t->path, -1, SQLITE_STATIC);
-			sqlite3_step(mu);
-		}
-		sqlite3_finalize(mu);
-	}
-	free(md5_jobs);
 }
 
 static void copy_to_clipboard(const char *text)
@@ -1098,66 +1072,6 @@ static int info_line_pad(WINDOW *pad, int y, int x, int w, int max_rows,
 	return rows;
 }
 
-/* print one info line, return number of rows consumed (wraps long values) */
-static int info_line(int y, int x, int w, const char *label, const char *val)
-{
-	if (y >= LINES - 1 || !val || w <= 0) return 0;
-	int lbl_w = 9;
-	if (lbl_w > w) lbl_w = w;
-	int rem = w - lbl_w;
-	if (rem <= 0) return 0;
-
-	move(y, x);
-	attron(A_BOLD);
-	print_field(label, lbl_w);
-	attroff(A_BOLD);
-
-	/* first line of value */
-	const char *p = val;
-	int cols = 0;
-	/* count columns for first line */
-	const char *s = p;
-	while (*s && cols < rem) {
-		int cw = 1;
-		if ((unsigned char)*s >= 0x80) {
-			wchar_t wc;
-			int mb = mbtowc(&wc, s, MB_CUR_MAX);
-			if (mb > 1) { cw = wcwidth(wc); if (cw < 0) cw = 1; s += mb; }
-			else s++;
-		} else s++;
-		cols += cw;
-	}
-	int first_bytes = s - p;
-	attron(COLOR_PAIR(5));
-	printw("%.*s", first_bytes, p);
-	attroff(COLOR_PAIR(5));
-	p += first_bytes;
-
-	int rows = 1;
-	while (*p && y + rows < LINES - 1) {
-		move(y + rows, x + lbl_w);
-		cols = 0;
-		s = p;
-		while (*s && cols < rem) {
-			int cw = 1;
-			if ((unsigned char)*s >= 0x80) {
-				wchar_t wc;
-				int mb = mbtowc(&wc, s, MB_CUR_MAX);
-				if (mb > 1) { cw = wcwidth(wc); if (cw < 0) cw = 1; s += mb; }
-				else s++;
-			} else s++;
-			cols += cw;
-		}
-		int nbytes = s - p;
-		attron(COLOR_PAIR(5));
-		printw("%.*s", nbytes, p);
-		attroff(COLOR_PAIR(5));
-		p += nbytes;
-		rows++;
-	}
-	return rows;
-}
-
 static void get_cell_size(int *cw, int *ch)
 {
 	struct winsize ws;
@@ -1290,7 +1204,7 @@ static void render_sidebar(int selected, int side_x, int side_w, int rows_h)
 		info_pad = ipad;
 		info_pad_sminrow = div_y + 1;
 		info_pad_smincol = side_x;
-		info_pad_smaxrow = rows_h - 1;
+		info_pad_smaxrow = rows_h;  /* extend to last content row to avoid ghost on resize */
 		info_pad_smaxcol = side_x + aw - 1;
 	}
 }
@@ -1556,7 +1470,7 @@ static void kitty_place(int y, int x, int cols, int rows)
 {
 	char cmd[256];
 	int n = snprintf(cmd, sizeof(cmd),
-		"\033[%d;%dH\033_Gq=2,a=p,i=%u,c=%d,r=%d,C=1\033\\",
+		"\033[%d;%dH\033_Gq=2,a=p,i=%u,p=1,c=%d,r=%d,C=1\033\\",
 		y + 1, x + 1, kitty_img_id, cols, rows);
 	write(STDOUT_FILENO, cmd, n);
 }
@@ -1656,8 +1570,8 @@ static void render(int top, int selected)
 							if (stat(resolved, &cst) != 0)
 								magick_cache(src,
 									resolved);
-							else
-								strncpy(resolved, no_art_path,
+						} else {
+							strncpy(resolved, get_no_art_path(),
 									sizeof(resolved) - 1);
 						}
 						strncpy(last_art_val, resolved,
@@ -1722,12 +1636,6 @@ static void render(int top, int selected)
 			}
 		}
 
-		/* re-place every frame for stability */
-		if (*cur_art_path) {
-			int art_x = art_cols < aw ? (aw - art_cols) / 2 : 0;
-			kitty_place(art_y, art_x, art_cols, art_rows);
-		}
-
 		/* restore cursor for ncurses */
 		write(STDOUT_FILENO, "\0338", 2);
 	}
@@ -1743,6 +1651,7 @@ int main(int argc, char *argv[])
 	static char dbpath[PATH_MAX];
 	const char *home = getenv("HOME");
 	if (!home) { fprintf(stderr, "$HOME not set\n"); return 1; }
+	g_home = home;
 	snprintf(dbpath, sizeof(dbpath), DB_PATH_FMT, home);
 
 	/* optional arg: folder path — index it first, then open TUI filtered there */
@@ -1759,6 +1668,13 @@ int main(int argc, char *argv[])
 	signal(SIGSEGV, crash_handler);
 	signal(SIGABRT, crash_handler);
 	signal(SIGBUS, crash_handler);
+	{
+		struct sigaction sa = {{0}};
+		sa.sa_handler = sigchld_handler;
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = SA_NOCLDSTOP;
+		sigaction(SIGCHLD, &sa, NULL);
+	}
 
 	/* when folder passed: index it first (add/update in db) */
 	if (start_dir[0]) {
@@ -1964,12 +1880,20 @@ int main(int argc, char *argv[])
 						track_t *t = &tracks[view[selected].track_idx];
 						pid_t pid = fork();
 						if (pid == 0) {
+							int nul = open("/dev/null", O_RDWR);
+							if (nul >= 0) {
+								dup2(nul, STDIN_FILENO);
+								dup2(nul, STDOUT_FILENO);
+								dup2(nul, STDERR_FILENO);
+								close(nul);
+							}
 							execlp("qua-music-lib", "qua-music-lib",
 							       "-i", t->path, (char *)NULL);
 							_exit(127);
 						} else if (pid > 0) {
 							int st;
 							waitpid(pid, &st, 0);
+							clearok(stdscr, TRUE);
 						}
 						if (disk_db) {
 							sqlite3_stmt *q;
@@ -2095,28 +2019,12 @@ int main(int argc, char *argv[])
 					    *cur_art_path &&
 					    selected >= 0 && selected < nview &&
 					    view[selected].type == VIEW_TRACK) {
-						/* right-click on art area: open image (original or displayed) */
 						track_t *t = &tracks[view[selected].track_idx];
 						char adir[PATH_MAX], src[PATH_MAX] = "";
 						path_dir(t->path, adir, sizeof(adir));
 						find_cover_art(adir, src, sizeof(src));
-						/* if (!*src && *cur_art_path) */
-						/* 	strncpy(src, cur_art_path, sizeof(src) - 1); */
-						if (*src) {
-							pid_t pid = fork();
-							if (pid == 0) {
-								int nul = open("/dev/null", O_RDWR);
-								if (nul >= 0) {
-									dup2(nul, STDIN_FILENO);
-									dup2(nul, STDOUT_FILENO);
-									dup2(nul, STDERR_FILENO);
-									close(nul);
-								}
-								execlp("nsxiv-rifle", "nsxiv-rifle",
-								       src, (char *)NULL);
-								_exit(1);
-							}
-						}
+						if (*src)
+							run_action("view-image", src);
 					}
 				}
 			}
@@ -2236,20 +2144,9 @@ int main(int argc, char *argv[])
 				selected = next_group(selected, rows_h); break;
 			case 'o': /* open track's directory */
 				if (selected >= 0 && selected < nview &&
-				    view[selected].type == VIEW_TRACK) {
-					const char *fpath =
-						tracks[view[selected].track_idx].path;
-					pid_t pid = fork();
-					if (pid == 0) {
-						setsid();
-						freopen("/dev/null", "w", stdout);
-						freopen("/dev/null", "w", stderr);
-						freopen("/dev/null", "r", stdin);
-						execlp("thunar", "thunar",
-						       fpath, NULL);
-						_exit(1);
-					}
-				}
+				    view[selected].type == VIEW_TRACK)
+					run_action("open-dir",
+					    tracks[view[selected].track_idx].path);
 				break;
 			case 'a': {
 				if (selected >= 0 && selected < nview &&
@@ -2267,14 +2164,9 @@ int main(int argc, char *argv[])
 			case 'p':
 				play_track(selected);
 				break;
-			case 's': {
-				pid_t pid = fork();
-				if (pid == 0) {
-					execlp("qua-stop", "qua-stop", NULL);
-					_exit(1);
-				}
+			case 's':
+				run_action("stop", NULL);
 				break;
-			}
 			case 'q': goto quit;
 			case 'c': {
 				int ch2 = getch();

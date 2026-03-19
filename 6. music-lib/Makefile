@@ -14,6 +14,10 @@ TUI_LIBS = -lsqlite3 -lncursesw -lm -lpthread
 
 all: $(TARGET) $(TUI)
 
+setup: no-art.png
+	mkdir -p $$HOME/.config/qua-player
+	cp no-art.png $$HOME/.config/qua-player/
+
 $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LDFLAGS) $(LIBS)
 	@echo "Build complete: ./$(TARGET)"
@@ -35,4 +39,4 @@ uninstall:
 clean:
 	rm -f $(TARGET) $(TUI)
 
-.PHONY: all install uninstall clean
+.PHONY: all setup install uninstall clean
